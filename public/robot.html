@@ -21,10 +21,7 @@
       box-shadow: 0 16px 40px rgba(0,0,0,0.5);
       border: 1px solid #1f2937;
     }
-    .row {
-      display:flex; flex-wrap:wrap; gap:10px;
-      margin-bottom:10px; align-items:center;
-    }
+    .row { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:10px; align-items:center; }
     label { font-size: 0.85rem; color:#9ca3af; }
     input, select {
       background:#020617; color:#e5e7eb;
@@ -75,6 +72,7 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       font-size:0.75rem; max-height:240px; overflow-y:auto; white-space:pre-wrap;
     }
+    .small { font-size: 12px; color:#9ca3af; }
   </style>
 </head>
 
@@ -98,11 +96,17 @@
         <option value="video360">Local 360 (/360.mp4)</option>
       </select>
 
-      <label>Format meta:</label>
-      <select id="format" style="width: 160px">
-        <option value="flat2d">flat2d</option>
-        <option value="equirect360">equirect360</option>
+      <label>Stream mode:</label>
+      <select id="streamMode" style="width: 160px">
+        <option value="full360">full360</option>
+        <option value="viewport">viewport</option>
       </select>
+
+      <label>HFOV:</label>
+      <input id="hfov" style="width:90px" value="120"/>
+
+      <label>VFOV:</label>
+      <input id="vfov" style="width:90px" value="90"/>
     </div>
 
     <div class="row">
@@ -110,9 +114,10 @@
       <button id="btnDisconnect" class="danger" disabled>Disconnect</button>
 
       <button id="btnStartMedia" class="secondary" disabled>Start Media</button>
-      <button id="btnSwitch" class="secondary" disabled>Switch Source</button>
+      <button id="btnSwitchSource" class="secondary" disabled>Switch Source</button>
 
       <button id="btnStopAll" class="danger" disabled>Stop All</button>
+      <span class="small">Tip: start media before selecting robot in Unity for fastest first-connect.</span>
     </div>
 
     <div class="status-bar">
@@ -124,7 +129,7 @@
 
     <div class="grid">
       <div class="pane">
-        <h2>Local preview (what you send)</h2>
+        <h2>Outgoing preview (what you send)</h2>
         <video id="preview" autoplay muted playsinline></video>
         <div class="logs" id="rawLog"></div>
       </div>
@@ -135,28 +140,26 @@
       </div>
 
       <div class="pane">
-        <h2>Signaling (offer/answer/candidates)</h2>
+        <h2>Signaling (offer/answer/candidates + viewport)</h2>
         <div class="logs" id="sigLog"></div>
       </div>
     </div>
   </div>
 
 <script>
-  // ------ Variables ------
-  let controlCount = 0;
-  let lastControlAt = 0;
-  
   // ---------- UI ----------
   const wsUrlEl = document.getElementById("wsUrl");
   const robotIdEl = document.getElementById("robotId");
   const stunEl = document.getElementById("stunUrl");
   const sourceEl = document.getElementById("source");
-  const formatEl = document.getElementById("format");
+  const streamModeEl = document.getElementById("streamMode");
+  const hfovEl = document.getElementById("hfov");
+  const vfovEl = document.getElementById("vfov");
 
   const btnConnect = document.getElementById("btnConnect");
   const btnDisconnect = document.getElementById("btnDisconnect");
   const btnStartMedia = document.getElementById("btnStartMedia");
-  const btnSwitch = document.getElementById("btnSwitch");
+  const btnSwitchSource = document.getElementById("btnSwitchSource");
   const btnStopAll = document.getElementById("btnStopAll");
 
   const wsStatusEl = document.getElementById("wsStatus");
@@ -191,10 +194,24 @@
   let ws = null;
   let pc = null;
 
-  let localStream = null;
-  let localVideoEl = null;        // if using /360.mp4 we keep the <video> element around
-  let videoSender = null;         // RTCRtpSender for video (so we can replaceTrack)
-  let pendingOffer = null;        // queue offer if Unity offers before we start media
+  let localStream = null;     // preview stream (what we show in <video>)
+  let localVideoEl = null;    // when source is /360.mp4 we keep a hidden <video>
+  let webcamStream = null;
+
+  let videoSender = null;     // RTCRtpSender for outgoing video
+  let pendingOffer = null;    // queue offer if Unity offers before media is ready
+
+  // viewport state (driven by Unity)
+  const viewport = { yawDeg: 0, pitchDeg: 0, hfovDeg: 120, vfovDeg: 90 };
+
+  // crop machinery (for viewport mode)
+  let cropCanvas = null;
+  let cropCtx = null;
+  let cropTimer = null;
+
+  // control stats
+  let controlCount = 0;
+  let lastControlAt = 0;
 
   function sendWs(obj) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -202,6 +219,8 @@
     ws.send(s);
     log(rawLog, "WS -> " + s);
   }
+
+  function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 
   // ---------- WebRTC ----------
   function ensurePc() {
@@ -230,81 +249,6 @@
     setStatus(pcStatusEl, "WebRTC: created", "ok");
   }
 
-  function attachOrReplaceVideoTrack() {
-    ensurePc();
-    if (!localStream) return;
-
-    const newVideoTrack = localStream.getVideoTracks()[0];
-    if (!newVideoTrack) return;
-
-    if (videoSender) {
-      // Hot swap without renegotiation (best effort)
-      videoSender.replaceTrack(newVideoTrack);
-      log(sigLog, "replaceTrack(video) called");
-    } else {
-      videoSender = pc.addTrack(newVideoTrack, localStream);
-      log(sigLog, "addTrack(video)");
-    }
-  }
-
-  async function startMediaFromWebcam() {
-    // stop old tracks
-    stopLocalMediaOnly();
-
-    localStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 1280, height: 720, frameRate: 30 },
-      audio: false
-    });
-    preview.srcObject = localStream;
-    setStatus(mediaStatusEl, "Media: webcam", "ok");
-  }
-
-  async function startMediaFrom360() {
-    stopLocalMediaOnly();
-
-    localVideoEl = document.createElement("video");
-    localVideoEl.src = "/360.mp4";
-    localVideoEl.loop = true;
-    localVideoEl.muted = true;
-    localVideoEl.playsInline = true;
-
-    await localVideoEl.play();
-    localStream = localVideoEl.captureStream();
-
-    preview.srcObject = localStream;
-    setStatus(mediaStatusEl, "Media: 360 video", "ok");
-  }
-
-  function stopLocalMediaOnly() {
-    if (localStream) {
-      localStream.getTracks().forEach(t => t.stop());
-      localStream = null;
-    }
-    if (localVideoEl) {
-      try { localVideoEl.pause(); } catch {}
-      localVideoEl = null;
-    }
-    preview.srcObject = null;
-  }
-
-  async function ensureMediaForSelectedSource() {
-    if (sourceEl.value === "webcam") await startMediaFromWebcam();
-    else await startMediaFrom360();
-
-    // tell Unity how to render it
-    sendWs({ type: "streamFormat", format: formatEl.value });
-
-    // update the PC sender track without disconnecting WS
-    attachOrReplaceVideoTrack();
-
-    // if Unity already sent an offer earlier, answer now
-    if (pendingOffer) {
-      const offer = pendingOffer;
-      pendingOffer = null;
-      await handleOffer(offer);
-    }
-  }
-
   async function handleOffer(msg) {
     ensurePc();
 
@@ -313,8 +257,6 @@
       pendingOffer = msg;
       return;
     }
-
-    attachOrReplaceVideoTrack();
 
     await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
     const answer = await pc.createAnswer();
@@ -338,10 +280,195 @@
     }
   }
 
+  // ---------- Viewport crop ----------
+  function stopCropLoop() {
+    if (cropTimer) { clearInterval(cropTimer); cropTimer = null; }
+    cropCanvas = null;
+    cropCtx = null;
+  }
+
+  function startViewportCropFromEquirectVideo(videoEl, outW = 1280, outH = 720, fps = 30) {
+    stopCropLoop();
+
+    cropCanvas = document.createElement("canvas");
+    cropCanvas.width = outW;
+    cropCanvas.height = outH;
+    cropCtx = cropCanvas.getContext("2d", { alpha: false });
+
+    function draw() {
+      if (!videoEl.videoWidth || !videoEl.videoHeight) return;
+
+      const W = videoEl.videoWidth;
+      const H = videoEl.videoHeight;
+
+      // pull latest requested fov from UI (robot-side override) if present
+      const hfov = clamp(parseFloat(hfovEl.value || "120"), 10, 180);
+      const vfov = clamp(parseFloat(vfovEl.value || "90"), 10, 120);
+
+      viewport.hfovDeg = hfov;
+      viewport.vfovDeg = vfov;
+
+      // yaw [-180,180] -> x [0,W)
+      let yaw = viewport.yawDeg;
+      while (yaw < -180) yaw += 360;
+      while (yaw > 180) yaw -= 360;
+      const cx = (yaw + 180) / 360 * W;
+
+      // pitch [-90,90] -> y [0,H)
+      const pitch = clamp(viewport.pitchDeg, -89, 89);
+      const cy = (90 - pitch) / 180 * H;
+
+      const cropW = (hfov / 360) * W;
+      const cropH = (vfov / 180) * H;
+
+      // top-left
+      let sx = cx - cropW / 2;
+      let sy = cy - cropH / 2;
+
+      // clamp vertical
+      sy = clamp(sy, 0, H - cropH);
+
+      // clear
+      cropCtx.fillRect(0, 0, outW, outH);
+
+      // horizontal wrap
+      if (sx >= 0 && sx + cropW <= W) {
+        cropCtx.drawImage(videoEl, sx, sy, cropW, cropH, 0, 0, outW, outH);
+      } else {
+        const sxNorm = ((sx % W) + W) % W; // bring into [0,W)
+        const leftW = Math.min(cropW, W - sxNorm);
+        const rightW = cropW - leftW;
+
+        if (leftW > 0) {
+          cropCtx.drawImage(videoEl, sxNorm, sy, leftW, cropH, 0, 0, outW * (leftW / cropW), outH);
+        }
+        if (rightW > 0) {
+          cropCtx.drawImage(videoEl, 0, sy, rightW, cropH, outW * (leftW / cropW), 0, outW * (rightW / cropW), outH);
+        }
+      }
+    }
+
+    cropTimer = setInterval(draw, 1000 / fps);
+    return cropCanvas.captureStream(fps);
+  }
+
+  // ---------- Media start / switching ----------
+  async function stopAllMediaOnly() {
+    stopCropLoop();
+
+    if (webcamStream) {
+      webcamStream.getTracks().forEach(t => t.stop());
+      webcamStream = null;
+    }
+    if (localVideoEl) {
+      try { localVideoEl.pause(); } catch {}
+      localVideoEl = null;
+    }
+    localStream = null;
+    preview.srcObject = null;
+
+    setStatus(mediaStatusEl, "Media: off", "idle");
+  }
+
+  async function ensureMediaForSelectedSource() {
+    await stopAllMediaOnly();
+
+    if (sourceEl.value === "webcam") {
+      webcamStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 1280, height: 720, frameRate: 30 },
+        audio: false
+      });
+      localStream = webcamStream;
+      preview.srcObject = localStream;
+
+      setStatus(mediaStatusEl, "Media: webcam", "ok");
+
+      // tell Unity how to render webcam (treat as flat)
+      sendWs({ type: "streamMode", mode: "viewport" }); // webcam is not panoramic; use viewport dome or 2D on Unity side
+      log(sigLog, "Sent streamMode=viewport (webcam)");
+      return;
+    }
+
+    // 360 video source
+    localVideoEl = document.createElement("video");
+    localVideoEl.src = "/360.mp4";
+    localVideoEl.loop = true;
+    localVideoEl.muted = true;
+    localVideoEl.playsInline = true;
+
+    await localVideoEl.play();
+
+    // initial mode
+    await rebuildOutgoingVideoTrack();
+
+    setStatus(mediaStatusEl, "Media: 360 video", "ok");
+  }
+
+  async function rebuildOutgoingVideoTrack() {
+    if (!pc) ensurePc();
+
+    // stop old crop loop if any
+    stopCropLoop();
+
+    let newStream = null;
+
+    if (sourceEl.value === "webcam") {
+      // webcam: just stream webcam
+      if (!webcamStream) return;
+      newStream = webcamStream;
+
+      // Webcam isn't 360; have Unity render as viewport/2D
+      sendWs({ type:"streamMode", mode:"viewport" });
+      log(sigLog, "streamMode -> viewport (webcam)");
+    }
+    else {
+      if (!localVideoEl) return;
+
+      const mode = streamModeEl.value;
+
+      if (mode === "full360") {
+        newStream = localVideoEl.captureStream(30);
+        sendWs({ type:"streamMode", mode:"full360" });
+        log(sigLog, "streamMode -> full360");
+      } else {
+        newStream = startViewportCropFromEquirectVideo(localVideoEl, 1280, 720, 30);
+        sendWs({ type:"streamMode", mode:"viewport" });
+        log(sigLog, "streamMode -> viewport");
+      }
+    }
+
+    if (!newStream) return;
+
+    const newTrack = newStream.getVideoTracks()[0];
+    if (!newTrack) return;
+
+    if (!videoSender) {
+      // First time: addTrack
+      videoSender = pc.addTrack(newTrack, newStream);
+      log(sigLog, "addTrack(video)");
+    } else {
+      // Hot swap
+      await videoSender.replaceTrack(newTrack);
+      log(sigLog, "replaceTrack(video)");
+    }
+
+    // local preview should match what we are sending
+    localStream = newStream;
+    preview.srcObject = localStream;
+
+    // If Unity offered earlier, answer now
+    if (pendingOffer) {
+      const offer = pendingOffer;
+      pendingOffer = null;
+      await handleOffer(offer);
+    }
+  }
+
+  // ---------- Cleanup ----------
   function cleanupAll() {
     pendingOffer = null;
 
-    stopLocalMediaOnly();
+    stopAllMediaOnly();
     setStatus(mediaStatusEl, "Media: off", "idle");
 
     if (pc) { try { pc.close(); } catch {} pc = null; }
@@ -353,21 +480,15 @@
 
     selStatusEl.textContent = "";
     btnStartMedia.disabled = true;
-    btnSwitch.disabled = true;
+    btnSwitchSource.disabled = true;
     btnDisconnect.disabled = true;
     btnStopAll.disabled = true;
     btnConnect.disabled = false;
+
+    log(sigLog, "Stopped all");
   }
 
-  setInterval(() => {
-    const ageMs = lastControlAt ? (Date.now() - lastControlAt) : null;
-    const ageTxt = ageMs == null ? "∞" : (ageMs/1000).toFixed(2) + "s";
-    // Show in the status bar
-    selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | controls: ${controlCount} | last: ${ageTxt}`;
-  }, 250);
-
-
-  // ---------- WS ----------
+  // ---------- WS connect ----------
   btnConnect.onclick = () => {
     if (ws && ws.readyState === WebSocket.OPEN) return;
 
@@ -377,14 +498,14 @@
       btnConnect.disabled = true;
       btnDisconnect.disabled = false;
       btnStartMedia.disabled = false;
-      btnSwitch.disabled = false;
+      btnSwitchSource.disabled = false;
       btnStopAll.disabled = false;
 
       // hello robot
       sendWs({ type:"hello", role:"robot", robotId: robotIdEl.value.trim(), meta:{ name:"Browser Robot Sim" } });
-      selStatusEl.textContent = "robotId: " + robotIdEl.value.trim();
-      // send initial stream format hint
-      sendWs({ type:"streamFormat", format: formatEl.value });
+      selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | controls: 0 | last: ∞`;
+
+      log(sigLog, "Connected. Waiting for offer… (select this robot in Unity)");
     };
 
     ws.onmessage = async (ev) => {
@@ -392,6 +513,7 @@
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
 
+      // --- gated controls from headset ---
       if (msg.type === "control") {
         controlCount++;
         lastControlAt = Date.now();
@@ -399,11 +521,25 @@
         return;
       }
 
+      // --- viewport from headset (for crop mode) ---
+      if (msg.type === "viewport") {
+        viewport.yawDeg = msg.yawDeg ?? viewport.yawDeg;
+        viewport.pitchDeg = msg.pitchDeg ?? viewport.pitchDeg;
+        viewport.hfovDeg = msg.hfovDeg ?? viewport.hfovDeg;
+        viewport.vfovDeg = msg.vfovDeg ?? viewport.vfovDeg;
+        log(sigLog, `Viewport <- yaw=${viewport.yawDeg.toFixed(1)} pitch=${viewport.pitchDeg.toFixed(1)} hfov=${viewport.hfovDeg} vfov=${viewport.vfovDeg}`);
+        return;
+      }
+
+      // --- signaling ---
       if (msg.type === "offer") { log(sigLog, "Offer received"); await handleOffer(msg); return; }
       if (msg.type === "candidate") { await handleCandidate(msg); return; }
+
+      // --- optional ack ---
+      if (msg.type === "hello_ok") { log(sigLog, "hello_ok"); return; }
     };
 
-    ws.onerror = (e) => setStatus(wsStatusEl, "WS: error", "bad");
+    ws.onerror = () => setStatus(wsStatusEl, "WS: error", "bad");
     ws.onclose = () => setStatus(wsStatusEl, "WS: disconnected", "idle");
   };
 
@@ -417,27 +553,37 @@
   btnStartMedia.onclick = async () => {
     try {
       await ensureMediaForSelectedSource();
-      log(rawLog, "Media started: " + sourceEl.value);
+      log(sigLog, "Media started: " + sourceEl.value);
     } catch (e) {
       setStatus(mediaStatusEl, "Media: error", "bad");
-      log(rawLog, "Media error: " + e.message);
+      log(sigLog, "Media error: " + e.message);
     }
   };
 
-  btnSwitch.onclick = async () => {
-    // Flip source UI then re-init media + replaceTrack (WS stays connected)
+  btnSwitchSource.onclick = async () => {
     sourceEl.value = (sourceEl.value === "webcam") ? "video360" : "webcam";
-    // If you want format to auto-follow source, uncomment:
-    // formatEl.value = (sourceEl.value === "video360") ? "equirect360" : "flat2d";
     await ensureMediaForSelectedSource();
-    log(rawLog, "Switched source to: " + sourceEl.value);
+    log(sigLog, "Switched source to: " + sourceEl.value);
   };
 
   btnStopAll.onclick = cleanupAll;
 
-  formatEl.onchange = () => {
-    sendWs({ type:"streamFormat", format: formatEl.value });
+  // change stream mode live (only affects 360 source)
+  streamModeEl.onchange = async () => {
+    log(sigLog, "Mode changed -> " + streamModeEl.value);
+    await rebuildOutgoingVideoTrack();
   };
+
+  // update local crop fov immediately
+  hfovEl.onchange = async () => { if (streamModeEl.value === "viewport") await rebuildOutgoingVideoTrack(); };
+  vfovEl.onchange = async () => { if (streamModeEl.value === "viewport") await rebuildOutgoingVideoTrack(); };
+
+  // update status (control freshness)
+  setInterval(() => {
+    const ageMs = lastControlAt ? (Date.now() - lastControlAt) : null;
+    const ageTxt = ageMs == null ? "∞" : (ageMs/1000).toFixed(2) + "s";
+    selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | controls: ${controlCount} | last: ${ageTxt}`;
+  }, 250);
 
   window.addEventListener("beforeunload", () => cleanupAll());
 </script>
