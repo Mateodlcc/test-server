@@ -7,160 +7,275 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const PORT = process.env.PORT || 3000;
-
-app.get("/", (req, res) => res.send("Signal Server Running!"));
-
-server.listen(PORT, () => {
-  console.log("Server listening on port " + PORT);
-});
+server.listen(PORT, () => console.log("Server listening on port " + PORT));
+app.get("/", (req, res) => res.send("Signal/Control Server Running!"));
 
 /**
- * Room model:
- * rooms[roomId] = { publisher: ws|null, viewers: Set<ws> }
+ * State:
+ * robots: robotId -> { ws, meta, lastSeen }
+ * headsets: clientId -> { ws, selectedRobotId, lastControlTs, lastSeq }
  */
-const rooms = new Map();
-
-function getRoom(roomId) {
-  if (!rooms.has(roomId)) {
-    rooms.set(roomId, { publisher: null, viewers: new Set() });
-  }
-  return rooms.get(roomId);
-}
+const robots = new Map();
+const headsets = new Map();
 
 function safeSend(ws, obj) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify(obj));
 }
 
-function cleanupSocket(ws) {
-  const roomId = ws._roomId;
-  const role = ws._role;
-  if (!roomId) return;
+function nowMs() { return Date.now(); }
 
-  const room = rooms.get(roomId);
-  if (!room) return;
+function snapshotRobots() {
+  const out = [];
+  for (const [robotId, r] of robots.entries()) {
+    out.push({
+      robotId,
+      meta: r.meta || {},
+      online: true,
+      lastSeen: r.lastSeen
+    });
+  }
+  return out;
+}
 
-  if (role === "publisher") {
-    if (room.publisher === ws) room.publisher = null;
-    // Notify viewers that publisher left
-    for (const v of room.viewers) safeSend(v, { type: "publisher_left" });
-  } else if (role === "viewer") {
-    room.viewers.delete(ws);
+/** --- SAFETY BARRIER (edit to your needs) --- */
+function gateControl(headsetState, robotId, controlMsg) {
+  // 1) Must be controlling selected robot
+  if (headsetState.selectedRobotId !== robotId) {
+    return { ok: false, status: "rejected", reason: "not_selected_robot" };
   }
 
-  // Delete empty room
-  if (!room.publisher && room.viewers.size === 0) rooms.delete(roomId);
+  // 2) Rate limit (e.g., 30 Hz)
+  const t = nowMs();
+  const minDt = 1000 / 30;
+  if (headsetState.lastControlTs && (t - headsetState.lastControlTs) < minDt) {
+    return { ok: false, status: "dropped", reason: "rate_limited" };
+  }
+  headsetState.lastControlTs = t;
+
+  // 3) Sequence monotonicity (optional)
+  if (typeof controlMsg.seq === "number") {
+    if (typeof headsetState.lastSeq === "number" && controlMsg.seq <= headsetState.lastSeq) {
+      return { ok: false, status: "dropped", reason: "old_seq" };
+    }
+    headsetState.lastSeq = controlMsg.seq;
+  }
+
+  // 4) Clamp joystick values to [-1, 1]
+  const clamp = (v) => Math.max(-1, Math.min(1, v));
+  const gated = { ...controlMsg };
+  if (typeof gated.lx === "number") gated.lx = clamp(gated.lx);
+  if (typeof gated.ly === "number") gated.ly = clamp(gated.ly);
+  if (typeof gated.rx === "number") gated.rx = clamp(gated.rx);
+  if (typeof gated.ry === "number") gated.ry = clamp(gated.ry);
+
+  // 5) Example “deadman switch” (optional):
+  // require a button held to forward motion
+  // if (!gated.deadman) { gated.lx = 0; gated.ly = 0; }
+
+  return { ok: true, status: "forwarded", gatedMsg: gated };
+}
+
+function detachHeadsetFromRobot(clientId) {
+  const hs = headsets.get(clientId);
+  if (!hs) return;
+  const oldRobotId = hs.selectedRobotId;
+  hs.selectedRobotId = null;
+
+  if (oldRobotId && robots.has(oldRobotId)) {
+    safeSend(robots.get(oldRobotId).ws, { type: "viewer_detached", clientId });
+  }
 }
 
 wss.on("connection", (ws) => {
-  console.log("Client connected");
+  ws._role = null;
+  ws._robotId = null;
+  ws._clientId = null;
 
   ws.on("message", (raw) => {
     let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch (e) {
-      console.log("Non-JSON message ignored:", raw.toString());
-      return;
-    }
+    try { msg = JSON.parse(raw.toString()); }
+    catch { return; }
 
-    // 1) JOIN HANDSHAKE
-    if (msg.type === "join") {
-      const roomId = String(msg.room || "default");
-      const role = msg.role === "publisher" ? "publisher" : "viewer";
+    /** HELLO / IDENTIFY */
+    if (msg.type === "hello") {
+      if (msg.role === "robot") {
+        const robotId = String(msg.robotId || "");
+        if (!robotId) { safeSend(ws, { type: "error", reason: "robotId_required" }); return; }
 
-      ws._roomId = roomId;
-      ws._role = role;
-
-      const room = getRoom(roomId);
-
-      if (role === "publisher") {
-        // Enforce one publisher per room (replace previous)
-        if (room.publisher && room.publisher !== ws) {
-          safeSend(room.publisher, { type: "kicked", reason: "New publisher joined" });
-          try { room.publisher.close(); } catch {}
+        // Replace existing robot with same id
+        if (robots.has(robotId) && robots.get(robotId).ws !== ws) {
+          try { robots.get(robotId).ws.close(); } catch {}
         }
-        room.publisher = ws;
 
-        console.log(`Publisher joined room=${roomId}`);
-        safeSend(ws, { type: "joined", room: roomId, role });
+        ws._role = "robot";
+        ws._robotId = robotId;
 
-        // Tell viewers publisher is available
-        for (const v of room.viewers) safeSend(v, { type: "publisher_ready" });
+        robots.set(robotId, { ws, meta: msg.meta || {}, lastSeen: nowMs() });
+        safeSend(ws, { type: "hello_ok", role: "robot", robotId });
 
-      } else {
-        room.viewers.add(ws);
-        console.log(`Viewer joined room=${roomId}`);
-        safeSend(ws, { type: "joined", room: roomId, role });
-
-        // If publisher already present, notify viewer
-        if (room.publisher) safeSend(ws, { type: "publisher_ready" });
-      }
-
-      return;
-    }
-
-    // Must be joined for anything else
-    const roomId = ws._roomId;
-    const role = ws._role;
-    if (!roomId || !role) {
-      safeSend(ws, { type: "error", reason: "Must join first: send {type:'join', room, role}" });
-      return;
-    }
-
-    const room = getRoom(roomId);
-
-    // 2) WEBRTC SIGNALING ROUTING
-    // viewer -> publisher (offer/candidate)
-    // publisher -> viewer (answer/candidate)
-    if (msg.type === "offer" || msg.type === "candidate") {
-      if (role === "viewer") {
-        // viewer to publisher
-        if (!room.publisher) {
-          safeSend(ws, { type: "error", reason: "No publisher in room" });
-          return;
+        // notify all headsets list changed
+        for (const [cid, hs] of headsets.entries()) {
+          safeSend(hs.ws, { type: "robots", robots: snapshotRobots() });
         }
-        safeSend(room.publisher, { ...msg, room: roomId, from: "viewer" });
-      } else {
-        // publisher broadcast to viewers (usually candidates)
-        for (const v of room.viewers) safeSend(v, { ...msg, room: roomId, from: "publisher" });
-      }
-      return;
-    }
 
-    if (msg.type === "answer") {
-      // publisher -> viewer(s), typically answer goes back to the viewer that offered.
-      // simplest: send to ALL viewers (works if you only have 1 viewer per room)
-      if (role !== "publisher") {
-        safeSend(ws, { type: "error", reason: "Only publisher can send answer" });
         return;
       }
-      for (const v of room.viewers) safeSend(v, { ...msg, room: roomId, from: "publisher" });
+
+      if (msg.role === "headset") {
+        const clientId = String(msg.clientId || "headset-" + Math.random().toString(16).slice(2));
+        ws._role = "headset";
+        ws._clientId = clientId;
+
+        headsets.set(clientId, {
+          ws,
+          selectedRobotId: null,
+          lastControlTs: 0,
+          lastSeq: null,
+        });
+
+        safeSend(ws, { type: "hello_ok", role: "headset", clientId });
+        safeSend(ws, { type: "robots", robots: snapshotRobots() });
+
+        return;
+      }
+
+      safeSend(ws, { type: "error", reason: "role_must_be_robot_or_headset" });
       return;
     }
 
-    // 3) CONTROLS: viewer -> publisher only
-    if (msg.type === "control") {
-      if (role !== "viewer") return;
-      if (!room.publisher) return;
-      safeSend(room.publisher, { ...msg, room: roomId, from: "viewer" });
+    /** Must be identified from here on */
+    if (!ws._role) {
+      safeSend(ws, { type: "error", reason: "send_hello_first" });
       return;
     }
 
-    // 4) STREAM FORMAT METADATA: publisher -> viewers
-    // {type:"streamFormat", format:"flat2d"|"equirect360"}
-    if (msg.type === "streamFormat") {
-      if (role !== "publisher") return;
-      for (const v of room.viewers) safeSend(v, { ...msg, room: roomId, from: "publisher" });
+    /** HEADSET COMMANDS */
+    if (ws._role === "headset") {
+      const clientId = ws._clientId;
+      const hs = headsets.get(clientId);
+      if (!hs) return;
+
+      if (msg.type === "list_robots") {
+        safeSend(ws, { type: "robots", robots: snapshotRobots() });
+        return;
+      }
+
+      if (msg.type === "select_robot") {
+        const robotId = String(msg.robotId || "");
+        if (!robots.has(robotId)) {
+          safeSend(ws, { type: "error", reason: "robot_not_online", robotId });
+          return;
+        }
+
+        // detach from previous
+        if (hs.selectedRobotId && hs.selectedRobotId !== robotId) {
+          detachHeadsetFromRobot(clientId);
+        }
+
+        hs.selectedRobotId = robotId;
+        safeSend(ws, { type: "selected_robot", robotId });
+
+        safeSend(robots.get(robotId).ws, { type: "viewer_attached", clientId });
+        return;
+      }
+
+      // WebRTC signaling from headset -> selected robot
+      if (msg.type === "offer" || msg.type === "candidate") {
+        const robotId = hs.selectedRobotId;
+        if (!robotId || !robots.has(robotId)) {
+          safeSend(ws, { type: "error", reason: "no_selected_robot" });
+          return;
+        }
+        safeSend(robots.get(robotId).ws, { ...msg, clientId });
+        return;
+      }
+
+      // Controls: headset -> server -> robot (after barrier)
+      if (msg.type === "control") {
+        const robotId = String(msg.robotId || hs.selectedRobotId || "");
+        if (!robotId || !robots.has(robotId)) {
+          safeSend(ws, { type: "error", reason: "robot_not_online_or_not_selected" });
+          return;
+        }
+
+        const result = gateControl(hs, robotId, msg);
+
+        if (!result.ok) {
+          // You can be noisy or silent; I recommend feedback for debugging
+          safeSend(ws, { type: "control_status", seq: msg.seq, status: result.status, reason: result.reason });
+          return;
+        }
+
+        safeSend(robots.get(robotId).ws, { ...result.gatedMsg, gated: true });
+        // optional: ack
+        // safeSend(ws, { type: "control_status", seq: msg.seq, status: "forwarded" });
+        return;
+      }
+
       return;
     }
 
-    // 5) default: ignore or log
-    // console.log("Unhandled msg", msg);
+    /** ROBOT COMMANDS */
+    if (ws._role === "robot") {
+      const robotId = ws._robotId;
+      const r = robots.get(robotId);
+      if (r) r.lastSeen = nowMs();
+
+      // WebRTC signaling from robot -> the headset that selected it
+      if (msg.type === "answer" || msg.type === "candidate") {
+        // Find all headsets currently monitoring this robot (usually 1)
+        for (const [cid, hs] of headsets.entries()) {
+          if (hs.selectedRobotId === robotId) {
+            safeSend(hs.ws, { ...msg });
+          }
+        }
+        return;
+      }
+
+      // Robot can push stream format to the headset(s)
+      if (msg.type === "streamFormat") {
+        for (const [cid, hs] of headsets.entries()) {
+          if (hs.selectedRobotId === robotId) {
+            safeSend(hs.ws, msg);
+          }
+        }
+        return;
+      }
+
+      // Optional: robot telemetry to headset(s)
+      if (msg.type === "telemetry") {
+        for (const [cid, hs] of headsets.entries()) {
+          if (hs.selectedRobotId === robotId) {
+            safeSend(hs.ws, msg);
+          }
+        }
+        return;
+      }
+
+      return;
+    }
   });
 
   ws.on("close", () => {
-    cleanupSocket(ws);
-    console.log("Client disconnected");
+    // cleanup
+    if (ws._role === "robot" && ws._robotId) {
+      robots.delete(ws._robotId);
+
+      // notify headsets that list changed
+      for (const [cid, hs] of headsets.entries()) {
+        safeSend(hs.ws, { type: "robots", robots: snapshotRobots() });
+        // if someone was watching that robot, tell them
+        if (hs.selectedRobotId === ws._robotId) {
+          hs.selectedRobotId = null;
+          safeSend(hs.ws, { type: "publisher_left", robotId: ws._robotId });
+        }
+      }
+    }
+
+    if (ws._role === "headset" && ws._clientId) {
+      detachHeadsetFromRobot(ws._clientId);
+      headsets.delete(ws._clientId);
+    }
   });
 });
