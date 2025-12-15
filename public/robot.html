@@ -186,18 +186,15 @@
   let ws = null;
   let pc = null;
 
-  let mediaOpId = 0;           // cancels stale async operations
+  let mediaOpId = 0;
   let pendingOffer = null;
 
-  // sources
   let webcamStream = null;
-  let video360El = null;       // <video> for /360.mp4
+  let video360El = null;
 
-  // outgoing
-  let localStream = null;      // what we preview
-  let videoSender = null;      // RTCRtpSender
+  let localStream = null;
+  let videoSender = null;
 
-  // crop machinery
   let cropCanvas = null;
   let cropCtx = null;
   let cropTimer = null;
@@ -274,14 +271,16 @@
     }
   }
 
-  // ---------- Crop ----------
+  // ---------- Crop helpers ----------
   function stopCropLoop() {
     if (cropTimer) { clearInterval(cropTimer); cropTimer = null; }
     cropCanvas = null;
     cropCtx = null;
   }
 
-  function startCroppedStreamFromEquirect(videoEl, outW=1280, outH=720, fps=30) {
+  // NEW: output a full equirect (outW x outH) that is BLACK everywhere,
+  // and copy only the requested viewport rectangle into the correct place.
+  function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
     stopCropLoop();
 
     cropCanvas = document.createElement("canvas");
@@ -292,47 +291,74 @@
     function draw() {
       if (!videoEl.videoWidth || !videoEl.videoHeight) return;
 
-      const W = videoEl.videoWidth;
-      const H = videoEl.videoHeight;
+      const srcW = videoEl.videoWidth;
+      const srcH = videoEl.videoHeight;
 
       const hfov = clamp(parseFloat(hfovEl.value || "120"), 10, 180);
       const vfov = clamp(parseFloat(vfovEl.value || "90"), 10, 120);
 
-      // yaw [-180,180] -> x [0,W)
+      // Fill with black (guarantees you see only updated region)
+      cropCtx.fillStyle = "black";
+      cropCtx.fillRect(0, 0, outW, outH);
+
+      // Normalize yaw to [-180,180]
       let yaw = viewport.yawDeg;
       while (yaw < -180) yaw += 360;
       while (yaw > 180) yaw -= 360;
-      const cx = (yaw + 180) / 360 * W;
 
-      // pitch [-90,90] -> y [0,H)
       const pitch = clamp(viewport.pitchDeg, -89, 89);
-      const cy = (90 - pitch) / 180 * H;
 
-      const cropW = (hfov / 360) * W;
-      const cropH = (vfov / 180) * H;
+      // Source center in pixels
+      const srcCx = (yaw + 180) / 360 * srcW;
+      const srcCy = (90 - pitch) / 180 * srcH;
 
-      let sx = cx - cropW / 2;
-      let sy = cy - cropH / 2;
+      const srcCropW = (hfov / 360) * srcW;
+      const srcCropH = (vfov / 180) * srcH;
 
-      // clamp vertical
-      sy = clamp(sy, 0, H - cropH);
+      let sx = srcCx - srcCropW / 2;
+      let sy = srcCy - srcCropH / 2;
+      sy = clamp(sy, 0, srcH - srcCropH);
 
-      cropCtx.fillRect(0, 0, outW, outH);
+      // Destination center in output equirect pixels
+      const dstCx = (yaw + 180) / 360 * outW;
+      const dstCy = (90 - pitch) / 180 * outH;
 
-      // wrap in X
-      if (sx >= 0 && sx + cropW <= W) {
-        cropCtx.drawImage(videoEl, sx, sy, cropW, cropH, 0, 0, outW, outH);
-      } else {
-        const sxNorm = ((sx % W) + W) % W;
-        const leftW = Math.min(cropW, W - sxNorm);
-        const rightW = cropW - leftW;
+      const dstCropW = (hfov / 360) * outW;
+      const dstCropH = (vfov / 180) * outH;
 
-        if (leftW > 0) {
-          cropCtx.drawImage(videoEl, sxNorm, sy, leftW, cropH, 0, 0, outW * (leftW / cropW), outH);
-        }
-        if (rightW > 0) {
-          cropCtx.drawImage(videoEl, 0, sy, rightW, cropH, outW * (leftW / cropW), 0, outW * (rightW / cropW), outH);
-        }
+      let dx = dstCx - dstCropW / 2;
+      let dy = dstCy - dstCropH / 2;
+      dy = clamp(dy, 0, outH - dstCropH);
+
+      // Wrap source X into [0,srcW)
+      const sxNorm = ((sx % srcW) + srcW) % srcW;
+
+      // Destination wrapping (dx can be negative)
+      const dxNorm = ((dx % outW) + outW) % outW;
+
+      // If neither wraps, draw once
+      const srcWraps = (sxNorm + srcCropW > srcW);
+      const dstWraps = (dxNorm + dstCropW > outW);
+
+      if (!srcWraps && !dstWraps) {
+        cropCtx.drawImage(videoEl, sxNorm, sy, srcCropW, srcCropH, dxNorm, dy, dstCropW, dstCropH);
+        return;
+      }
+
+      // We split by angular ratio based on how much fits before wrap in SOURCE
+      const srcLeftW = Math.min(srcCropW, srcW - sxNorm);
+      const srcRightW = srcCropW - srcLeftW;
+
+      const leftRatio = srcLeftW / srcCropW;
+      const dstLeftW = dstCropW * leftRatio;
+      const dstRightW = dstCropW - dstLeftW;
+
+      // Draw left part
+      cropCtx.drawImage(videoEl, sxNorm, sy, srcLeftW, srcCropH, dxNorm, dy, dstLeftW, dstCropH);
+
+      // Draw right part (wraps around)
+      if (srcRightW > 0.001) {
+        cropCtx.drawImage(videoEl, 0, sy, srcRightW, srcCropH, 0, dy, dstRightW, dstCropH);
       }
     }
 
@@ -349,7 +375,6 @@
       webcamStream = null;
     }
     if (video360El) {
-      // only pause if stopping current op (prevents interrupting a newer play())
       if (myOp === null || myOp === mediaOpId) {
         try { video360El.pause(); } catch {}
       }
@@ -363,10 +388,6 @@
   }
 
   function sendUnityRenderMode() {
-    // This tells Unity how to render:
-    // - flat2d  -> 2D canvas/panel
-    // - full360 -> skybox panoramic
-    // - crop360 -> partial sphere/dome
     const m = modeEl.value;
     let renderMode = "flat2d";
     if (m === "full360") renderMode = "full360";
@@ -380,7 +401,6 @@
   async function applyModeAndStartMedia() {
     const myOp = ++mediaOpId;
 
-    // disable UI while starting (prevents spam clicks)
     btnStartMedia.disabled = true;
     modeEl.disabled = true;
 
@@ -406,14 +426,12 @@
         setStatus(mediaStatusEl, "Media: webcam (2D)", "ok");
       }
       else {
-        // both full360 and crop360 use /360.mp4
         video360El = document.createElement("video");
         video360El.src = "/360.mp4";
         video360El.loop = true;
         video360El.muted = true;
         video360El.playsInline = true;
 
-        // wait metadata
         await new Promise((resolve, reject) => {
           const onLoaded = () => { cleanup(); resolve(); };
           const onErr = () => { cleanup(); reject(new Error("Failed to load /360.mp4")); };
@@ -437,15 +455,15 @@
           sendUnityRenderMode();
           setStatus(mediaStatusEl, "Media: 360 (skybox)", "ok");
         } else { // crop360
-          localStream = startCroppedStreamFromEquirect(video360El, 1280, 720, 30);
+          // IMPORTANT: stream a full equirect frame where everything else is black
+          localStream = startBlackEquirectWithViewport(video360El, 2048, 1024, 30);
           preview.srcObject = localStream;
 
           sendUnityRenderMode();
-          setStatus(mediaStatusEl, "Media: cropped 360 (sphere)", "ok");
+          setStatus(mediaStatusEl, "Media: crop360 as black equirect", "ok");
         }
       }
 
-      // attach/replace outgoing track
       const track = localStream.getVideoTracks()[0];
       if (!track) throw new Error("No video track to send");
 
@@ -457,7 +475,6 @@
         log(sigLog, "replaceTrack(video)");
       }
 
-      // if Unity offered earlier, answer now
       if (pendingOffer) {
         const offer = pendingOffer;
         pendingOffer = null;
@@ -530,10 +547,13 @@
         return;
       }
 
-      // viewport from Unity for crop360
       if (msg.type === "viewport") {
         if (typeof msg.yawDeg === "number") viewport.yawDeg = msg.yawDeg;
         if (typeof msg.pitchDeg === "number") viewport.pitchDeg = msg.pitchDeg;
+
+        // let Unity drive crop FOV
+        if (typeof msg.hfovDeg === "number") hfovEl.value = msg.hfovDeg;
+        if (typeof msg.vfovDeg === "number") vfovEl.value = msg.vfovDeg;
         return;
       }
 
@@ -554,19 +574,8 @@
     btnDisconnect.disabled = true;
   };
 
-  btnStartMedia.onclick = async () => {
-    await applyModeAndStartMedia();
-  };
-
+  btnStartMedia.onclick = async () => { await applyModeAndStartMedia(); };
   btnStopAll.onclick = cleanupAll;
-
-  // apply crop FOV without restarting everything (only if currently crop360)
-  hfovEl.onchange = () => {
-    if (modeEl.value === "crop360") log(sigLog, "HFOV updated (crop mode): " + hfovEl.value);
-  };
-  vfovEl.onchange = () => {
-    if (modeEl.value === "crop360") log(sigLog, "VFOV updated (crop mode): " + vfovEl.value);
-  };
 
   // status freshness
   setInterval(() => {
