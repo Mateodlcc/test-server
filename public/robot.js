@@ -180,7 +180,7 @@ function drawWrapped(video, ctx,
 }
 
 // Full equirect (outW x outH) that is BLACK everywhere, and only the viewport is drawn.
-function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
+function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024) {
   stopCropLoop();
 
   cropCanvas = document.createElement("canvas");
@@ -188,29 +188,37 @@ function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
   cropCanvas.height = outH;
   cropCtx = cropCanvas.getContext("2d", { alpha: false });
 
-  let lastKey = "";
+  let lastVideoTime = -1;
+  let dirty = true; // viewport changed
 
-  function draw(force=false) {
-    if (!videoEl.videoWidth || !videoEl.videoHeight) return;
+  function render() {
+    if (!videoEl.videoWidth || !videoEl.videoHeight) {
+      requestAnimationFrame(render);
+      return;
+    }
 
+    // redraw if video advanced OR viewport changed
+    if (videoEl.currentTime !== lastVideoTime || dirty) {
+      lastVideoTime = videoEl.currentTime;
+      dirty = false;
+      drawFrame();
+    }
+
+    requestAnimationFrame(render);
+  }
+
+  function drawFrame() {
     const yaw = normalizeYaw(viewport.yawDeg);
     const pitch = clamp(viewport.pitchDeg, -85, 85);
-
     const hfov = clamp(parseFloat(hfovEl.value || "120"), 20, 180);
     const vfov = clamp(parseFloat(vfovEl.value || "140"), 20, 160);
-
-    const key = `${yaw.toFixed(2)}|${pitch.toFixed(2)}|${hfov.toFixed(1)}|${vfov.toFixed(1)}|${videoEl.currentTime.toFixed(3)}`;
-    if (!force && key === lastKey) return;
-    lastKey = key;
 
     const srcW = videoEl.videoWidth;
     const srcH = videoEl.videoHeight;
 
-    // black background
     cropCtx.fillStyle = "black";
     cropCtx.fillRect(0, 0, outW, outH);
 
-    // SOURCE center in pixels
     const srcCx = (yaw + 180) / 360 * srcW;
     const srcCy = (90 - pitch) / 180 * srcH;
 
@@ -221,7 +229,6 @@ function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
     let sy = srcCy - srcCropH / 2;
     sy = clamp(sy, 0, srcH - srcCropH);
 
-    // DEST center in output equirect pixels
     const dstCx = (yaw + 180) / 360 * outW;
     const dstCy = (90 - pitch) / 180 * outH;
 
@@ -232,21 +239,22 @@ function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
     let dy = dstCy - dstCropH / 2;
     dy = clamp(dy, 0, outH - dstCropH);
 
-    drawWrapped(videoEl, cropCtx,
+    drawWrapped(
+      videoEl, cropCtx,
       srcW, srcH,
       sx, sy, srcCropW, srcCropH,
       outW, outH,
-      dx, dy, dstCropW, dstCropH);
+      dx, dy, dstCropW, dstCropH
+    );
   }
 
-  // redraw immediately when Unity updates viewport
-  viewport.onChange = () => draw(true);
+  // 🔥 mark dirty when viewport updates
+  viewport.onChange = () => { dirty = true; };
 
-  // keep refreshing as video advances
-  cropTimer = setInterval(() => draw(false), 1000 / fps);
-
-  return cropCanvas.captureStream(fps);
+  requestAnimationFrame(render);
+  return cropCanvas.captureStream(30);
 }
+
 
 // ---------- Media control ----------
 async function stopMediaOnly(myOp=null) {
