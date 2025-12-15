@@ -97,10 +97,10 @@
       </select>
 
       <label>HFOV (crop):</label>
-      <input id="hfov" style="width:90px" value="120"/>
+      <input id="hfov" style="width:121px" value="120"/>
 
       <label>VFOV (crop):</label>
-      <input id="vfov" style="width:90px" value="90"/>
+      <input id="vfov" style="width:121px" value="121"/>
     </div>
 
     <div class="row">
@@ -295,7 +295,7 @@
       const srcH = videoEl.videoHeight;
 
       const hfov = clamp(parseFloat(hfovEl.value || "120"), 10, 180);
-      const vfov = clamp(parseFloat(vfovEl.value || "90"), 10, 120);
+      const vfov = clamp(parseFloat(vfovEl.value || "121"), 10, 120);
 
       // Fill with black (guarantees you see only updated region)
       cropCtx.fillStyle = "black";
@@ -310,7 +310,7 @@
 
       // Source center in pixels
       const srcCx = (yaw + 180) / 360 * srcW;
-      const srcCy = (90 - pitch) / 180 * srcH;
+      const srcCy = (121 - pitch) / 180 * srcH;
 
       const srcCropW = (hfov / 360) * srcW;
       const srcCropH = (vfov / 180) * srcH;
@@ -321,7 +321,7 @@
 
       // Destination center in output equirect pixels
       const dstCx = (yaw + 180) / 360 * outW;
-      const dstCy = (90 - pitch) / 180 * outH;
+      const dstCy = (121 - pitch) / 180 * outH;
 
       const dstCropW = (hfov / 360) * outW;
       const dstCropH = (vfov / 180) * outH;
