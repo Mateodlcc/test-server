@@ -142,6 +142,10 @@
   </div>
 
 <script>
+  // ------ Variables ------
+  let controlCount = 0;
+  let lastControlAt = 0;
+  
   // ---------- UI ----------
   const wsUrlEl = document.getElementById("wsUrl");
   const robotIdEl = document.getElementById("robotId");
@@ -355,6 +359,14 @@
     btnConnect.disabled = false;
   }
 
+  setInterval(() => {
+    const ageMs = lastControlAt ? (Date.now() - lastControlAt) : null;
+    const ageTxt = ageMs == null ? "∞" : (ageMs/1000).toFixed(2) + "s";
+    // Show in the status bar
+    selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | controls: ${controlCount} | last: ${ageTxt}`;
+  }, 250);
+
+
   // ---------- WS ----------
   btnConnect.onclick = () => {
     if (ws && ws.readyState === WebSocket.OPEN) return;
@@ -380,7 +392,13 @@
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
 
-      if (msg.type === "control") { log(controlsLog, JSON.stringify(msg)); return; }
+      if (msg.type === "control") {
+        controlCount++;
+        lastControlAt = Date.now();
+        log(controlsLog, JSON.stringify(msg));
+        return;
+      }
+
       if (msg.type === "offer") { log(sigLog, "Offer received"); await handleOffer(msg); return; }
       if (msg.type === "candidate") { await handleCandidate(msg); return; }
     };
