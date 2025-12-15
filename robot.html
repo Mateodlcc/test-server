@@ -1,0 +1,308 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Robot Simulator (WebRTC Sender + WS Control)</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 16px; }
+    .row { display: flex; gap: 16px; }
+    .col { flex: 1; }
+    video { width: 100%; max-height: 260px; background: #111; }
+    textarea { width: 100%; height: 200px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    input, button, select { padding: 8px; }
+    .panel { border: 1px solid #ddd; padding: 12px; border-radius: 10px; }
+    .small { font-size: 12px; color: #666; }
+  </style>
+</head>
+
+<body>
+  <h2>Robot Simulator</h2>
+
+  <div class="panel">
+    <div class="row">
+      <div class="col">
+        <label>WS URL</label><br/>
+        <input id="wsUrl" style="width:100%" />
+        <div class="small">Tip: if opened from your Railway app domain, it will auto-fill wss://…</div>
+      </div>
+      <div class="col">
+        <label>robotId</label><br/>
+        <input id="robotId" style="width:100%" value="sim-robot-1" />
+      </div>
+      <div class="col">
+        <label>Video Source</label><br/>
+        <select id="source" style="width:100%">
+          <option value="webcam">Webcam</option>
+          <option value="video360">Local 360 (public/360.mp4)</option>
+        </select>
+      </div>
+      <div class="col">
+        <label>Stream Format (metadata)</label><br/>
+        <select id="format" style="width:100%">
+          <option value="flat2d">flat2d</option>
+          <option value="equirect360">equirect360</option>
+        </select>
+      </div>
+    </div>
+
+    <div style="margin-top:12px; display:flex; gap:12px;">
+      <button id="btnConnect">Connect WS</button>
+      <button id="btnStartMedia" disabled>Start Media</button>
+      <button id="btnStop" disabled>Stop</button>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:16px;">
+    <div class="col panel">
+      <h3>Local Preview</h3>
+      <video id="preview" autoplay playsinline muted></video>
+      <div class="small">This is what will be sent to Unity via WebRTC.</div>
+    </div>
+
+    <div class="col panel">
+      <h3>Controls from Headset (server → robot, gated)</h3>
+      <textarea id="controlsLog" readonly></textarea>
+    </div>
+
+    <div class="col panel">
+      <h3>Raw Traffic (WS + signaling)</h3>
+      <textarea id="rawLog" readonly></textarea>
+    </div>
+  </div>
+
+<script>
+  // ---------- helpers ----------
+  function logRaw(...args) {
+    const el = document.getElementById("rawLog");
+    el.value += args.join(" ") + "\n";
+    el.scrollTop = el.scrollHeight;
+  }
+  function logControls(obj) {
+    const el = document.getElementById("controlsLog");
+    el.value += JSON.stringify(obj) + "\n";
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function guessWsUrl() {
+    // If hosted on https://<domain>, prefer wss://<domain>
+    const { protocol, host } = window.location;
+    if (protocol === "https:") return `wss://${host}`;
+    if (protocol === "http:") return `ws://${host}`;
+    return "ws://localhost:3000";
+  }
+
+  // ---------- state ----------
+  let ws = null;
+  let pc = null;
+  let localStream = null;
+
+  // ---------- UI refs ----------
+  const wsUrlEl = document.getElementById("wsUrl");
+  const robotIdEl = document.getElementById("robotId");
+  const sourceEl = document.getElementById("source");
+  const formatEl = document.getElementById("format");
+
+  const btnConnect = document.getElementById("btnConnect");
+  const btnStartMedia = document.getElementById("btnStartMedia");
+  const btnStop = document.getElementById("btnStop");
+
+  const preview = document.getElementById("preview");
+
+  wsUrlEl.value = guessWsUrl();
+
+  // ---------- WebRTC ----------
+  function makePeerConnection() {
+    const config = {
+      iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }]
+    };
+    pc = new RTCPeerConnection(config);
+
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      const msg = {
+        type: "candidate",
+        candidate: ev.candidate.candidate,
+        sdpMid: ev.candidate.sdpMid,
+        sdpMLineIndex: ev.candidate.sdpMLineIndex
+      };
+      sendWs(msg);
+      logRaw("[PC] -> candidate", msg.candidate);
+    };
+
+    pc.onconnectionstatechange = () => {
+      logRaw("[PC] connectionState =", pc.connectionState);
+    };
+  }
+
+  async function startMedia() {
+    const source = sourceEl.value;
+
+    if (source === "webcam") {
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 1280, height: 720, frameRate: 30 },
+        audio: false
+      });
+      preview.srcObject = localStream;
+      return;
+    }
+
+    if (source === "video360") {
+      // Play local file from /360.mp4 and capture its stream
+      const video = document.createElement("video");
+      video.src = "/360.mp4";
+      video.loop = true;
+      video.muted = true;
+      video.playsInline = true;
+      await video.play();
+
+      // captureStream gives a MediaStream from the video element
+      localStream = video.captureStream();
+      preview.srcObject = localStream;
+      return;
+    }
+  }
+
+  function attachTracks() {
+    if (!pc) makePeerConnection();
+    if (!localStream) return;
+
+    // Remove any existing senders (if re-starting)
+    pc.getSenders().forEach(s => pc.removeTrack(s));
+
+    for (const track of localStream.getTracks()) {
+      pc.addTrack(track, localStream);
+    }
+  }
+
+  // ---------- WS protocol ----------
+  function sendWs(obj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const s = JSON.stringify(obj);
+    ws.send(s);
+    logRaw("[WS] ->", s);
+  }
+
+  function helloRobot() {
+    sendWs({
+      type: "hello",
+      role: "robot",
+      robotId: robotIdEl.value,
+      meta: { name: "Browser Robot Sim" }
+    });
+
+    // Tell headset what format to use (optional automation)
+    sendWs({
+      type: "streamFormat",
+      format: formatEl.value
+    });
+  }
+
+  async function onOffer(msg) {
+    logRaw("[SIG] got offer");
+    if (!pc) makePeerConnection();
+
+    // Make sure we already have tracks (so answer includes media)
+    if (!localStream) {
+      logRaw("[WARN] Offer arrived before media started. Start media first.");
+      return;
+    }
+    attachTracks();
+
+    await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    sendWs({ type: "answer", sdp: pc.localDescription.sdp });
+    logRaw("[SIG] sent answer");
+  }
+
+  async function onCandidate(msg) {
+    if (!pc) return;
+    try {
+      await pc.addIceCandidate({
+        candidate: msg.candidate,
+        sdpMid: msg.sdpMid,
+        sdpMLineIndex: msg.sdpMLineIndex
+      });
+      logRaw("[SIG] added candidate");
+    } catch (e) {
+      logRaw("[ERR] addIceCandidate:", e.message);
+    }
+  }
+
+  // ---------- buttons ----------
+  btnConnect.onclick = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+
+    ws = new WebSocket(wsUrlEl.value);
+
+    ws.onopen = () => {
+      logRaw("[WS] open");
+      helloRobot();
+      btnStartMedia.disabled = false;
+      btnStop.disabled = false;
+    };
+
+    ws.onmessage = (ev) => {
+      logRaw("[WS] <-", ev.data);
+
+      let msg;
+      try { msg = JSON.parse(ev.data); }
+      catch { return; }
+
+      // Headset controls (after gating) arrive as type:"control" (with gated:true from our server)
+      if (msg.type === "control") {
+        logControls(msg);
+        return;
+      }
+
+      // WebRTC signaling from headset
+      if (msg.type === "offer") onOffer(msg);
+      if (msg.type === "candidate") onCandidate(msg);
+    };
+
+    ws.onerror = (e) => logRaw("[WS] error", e.message || e);
+    ws.onclose = () => logRaw("[WS] closed");
+  };
+
+  btnStartMedia.onclick = async () => {
+    btnStartMedia.disabled = true;
+    await startMedia();
+    logRaw("[MEDIA] started:", sourceEl.value);
+
+    // Send stream format meta when user changes source
+    sendWs({ type: "streamFormat", format: formatEl.value });
+
+    // Create PC now (it will answer when offer arrives)
+    if (!pc) makePeerConnection();
+    attachTracks();
+  };
+
+  btnStop.onclick = () => {
+    if (pc) {
+      pc.close();
+      pc = null;
+    }
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+    preview.srcObject = null;
+
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+    btnStartMedia.disabled = true;
+    btnConnect.disabled = false;
+    logRaw("[STOP] cleaned up");
+  };
+
+  // Update streamFormat instantly when the dropdown changes
+  formatEl.onchange = () => {
+    sendWs({ type: "streamFormat", format: formatEl.value });
+  };
+</script>
+
+</body>
+</html>
