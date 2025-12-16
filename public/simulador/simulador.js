@@ -141,3 +141,145 @@ btnSendViewport.onclick = ()=>{
   // Para crop360 (si aplica)
   send({type:"viewport", robotId: selectedRobotId, yawDeg: 30, pitchDeg: -10, hfovDeg:120, vfovDeg:120});
 };
+
+// ---- Viewport joystick (mouse + touch) ----
+const joy = document.getElementById("joy");
+const ctx = joy.getContext("2d");
+const vpStateEl = document.getElementById("vpState");
+const yawRangeEl = document.getElementById("yawRange");
+const pitchRangeEl = document.getElementById("pitchRange");
+const hfovEl = document.getElementById("hfov");
+const vfovEl = document.getElementById("vfov");
+const btnCenter = document.getElementById("btnCenter");
+
+let dragging = false;
+let knob = { x: 0, y: 0 }; // normalized in [-1,1]
+let lastSent = 0;
+
+function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+
+function drawJoy() {
+  const w = joy.width, h = joy.height;
+  ctx.clearRect(0,0,w,h);
+
+  // base circle
+  const cx = w/2, cy = h/2;
+  const R = Math.min(w,h)*0.42;
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI*2);
+  ctx.strokeStyle = "#334155";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // crosshair
+  ctx.beginPath();
+  ctx.moveTo(cx-R, cy); ctx.lineTo(cx+R, cy);
+  ctx.moveTo(cx, cy-R); ctx.lineTo(cx, cy+R);
+  ctx.strokeStyle = "#1f2937";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // knob
+  const kx = cx + knob.x * R;
+  const ky = cy + knob.y * R;
+
+  ctx.beginPath();
+  ctx.arc(kx, ky, R*0.22, 0, Math.PI*2);
+  ctx.fillStyle = "#4f46e5";
+  ctx.fill();
+
+  // small outline
+  ctx.beginPath();
+  ctx.arc(kx, ky, R*0.22, 0, Math.PI*2);
+  ctx.strokeStyle = "#c7d2fe";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+function updateKnobFromClient(clientX, clientY) {
+  const rect = joy.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+
+  const cx = rect.width/2, cy = rect.height/2;
+  const R = Math.min(rect.width, rect.height)*0.42;
+
+  let nx = (x - cx) / R;
+  let ny = (y - cy) / R;
+
+  // clamp to circle
+  const mag = Math.hypot(nx, ny);
+  if (mag > 1) { nx /= mag; ny /= mag; }
+
+  knob.x = nx;
+  knob.y = ny;
+
+  sendViewportThrottled();
+  drawJoy();
+}
+
+function viewportFromKnob() {
+  const yawRange = Number(yawRangeEl.value || 90);
+  const pitchRange = Number(pitchRangeEl.value || 45);
+
+  // yaw: left/right, pitch: up/down (invert y so up is positive pitch if you want)
+  const yawDeg = knob.x * yawRange;
+  const pitchDeg = -knob.y * pitchRange;
+
+  const hfovDeg = Number(hfovEl.value || 120);
+  const vfovDeg = Number(vfovEl.value || 120);
+
+  return { yawDeg, pitchDeg, hfovDeg, vfovDeg };
+}
+
+function sendViewportThrottled() {
+  const now = performance.now();
+  // ~30 Hz
+  if (now - lastSent < 33) return;
+  lastSent = now;
+
+  if (!selectedRobotId) return;
+
+  const vp = viewportFromKnob();
+  vpStateEl.textContent =
+`yawDeg: ${vp.yawDeg.toFixed(1)}
+pitchDeg: ${vp.pitchDeg.toFixed(1)}
+hfovDeg: ${vp.hfovDeg.toFixed(0)}
+vfovDeg: ${vp.vfovDeg.toFixed(0)}`;
+
+  send({ type:"viewport", robotId: selectedRobotId, ...vp });
+}
+
+function onDown(e){
+  dragging = true;
+  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
+  updateKnobFromClient(p.clientX, p.clientY);
+}
+function onMove(e){
+  if (!dragging) return;
+  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
+  updateKnobFromClient(p.clientX, p.clientY);
+}
+function onUp(){
+  dragging = false;
+}
+
+joy.addEventListener("mousedown", onDown);
+window.addEventListener("mousemove", onMove);
+window.addEventListener("mouseup", onUp);
+
+joy.addEventListener("touchstart", (e)=>{ e.preventDefault(); onDown(e); }, {passive:false});
+joy.addEventListener("touchmove", (e)=>{ e.preventDefault(); onMove(e); }, {passive:false});
+joy.addEventListener("touchend", (e)=>{ e.preventDefault(); onUp(); }, {passive:false});
+joy.addEventListener("touchcancel", (e)=>{ e.preventDefault(); onUp(); }, {passive:false});
+
+btnCenter.addEventListener("click", ()=>{
+  knob.x = 0; knob.y = 0;
+  drawJoy();
+  // send immediately
+  lastSent = 0;
+  sendViewportThrottled();
+});
+
+drawJoy();

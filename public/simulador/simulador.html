@@ -33,6 +33,33 @@
     <button id="btnSendViewport">Send Viewport (test)</button>
   </div>
 
+  <div style="margin-top:12px; display:flex; gap:12px; flex-wrap:wrap; align-items:flex-start;">
+    <div>
+      <div style="margin-bottom:6px; opacity:.9;">Viewport joystick</div>
+      <canvas id="joy" width="220" height="220"
+        style="touch-action:none; background:#0b1220; border:1px solid #334155; border-radius:16px;"></canvas>
+      <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+        <label>Yaw range</label>
+        <input id="yawRange" type="number" value="90" style="width:80px;">°
+        <label>Pitch range</label>
+        <input id="pitchRange" type="number" value="45" style="width:80px;">°
+      </div>
+      <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+        <label>HFOV</label>
+        <input id="hfov" type="number" value="120" style="width:80px;">°
+        <label>VFOV</label>
+        <input id="vfov" type="number" value="120" style="width:80px;">°
+        <button id="btnCenter" style="background:#334155;">Center</button>
+      </div>
+    </div>
+
+    <div style="min-width:240px;">
+      <div style="opacity:.9; margin-bottom:6px;">Viewport state</div>
+      <pre id="vpState" style="margin:0;">yawDeg: 0 pitchDeg: 0</pre>
+    </div>
+  </div>
+
+
   <video id="vid" autoplay playsinline></video>
   <pre id="log"></pre>
 
