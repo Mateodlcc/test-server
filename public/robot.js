@@ -212,7 +212,7 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
   function drawFrame() {
     if (!videoEl.videoWidth || !videoEl.videoHeight) return;
 
-    const yaw = normalizeYaw(viewport.yawDeg);
+    const yaw = normalizeYaw(-viewport.yawDeg);
     const pitch = clamp(viewport.pitchDeg, -85, 85);
 
     // allow VFOV > 90 safely
@@ -221,10 +221,6 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
 
     const srcW = videoEl.videoWidth;
     const srcH = videoEl.videoHeight;
-
-    // black background (forces “only updated region is visible”)
-    cropCtx.fillStyle = "black";
-    cropCtx.fillRect(0, 0, outW, outH);
 
     // SOURCE crop region (equirect)
     const srcCx = (yaw + 180) / 360 * srcW;
