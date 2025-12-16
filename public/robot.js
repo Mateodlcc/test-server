@@ -143,9 +143,13 @@ async function handleCandidate(msg) {
 // ---------- Crop ----------
 function stopCropLoop() {
   if (cropTimer) { clearInterval(cropTimer); cropTimer = null; }
+  viewport.onChange = null;
+
+  if (cropCanvas) {
+    try { cropCanvas.remove(); } catch {}
+  }
   cropCanvas = null;
   cropCtx = null;
-  viewport.onChange = null;
 }
 
 function drawWrapped(video, ctx,
@@ -180,37 +184,49 @@ function drawWrapped(video, ctx,
 }
 
 // Full equirect (outW x outH) that is BLACK everywhere, and only the viewport is drawn.
-function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
+function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
   stopCropLoop();
 
+  // Create + attach hidden canvas (Brave can optimize unattached canvases)
   cropCanvas = document.createElement("canvas");
   cropCanvas.width = outW;
   cropCanvas.height = outH;
+  cropCanvas.style.position = "fixed";
+  cropCanvas.style.left = "-10000px";
+  cropCanvas.style.top = "-10000px";
+  cropCanvas.style.width = "1px";
+  cropCanvas.style.height = "1px";
+  cropCanvas.style.opacity = "0";
+  document.body.appendChild(cropCanvas);
+
   cropCtx = cropCanvas.getContext("2d", { alpha: false });
 
-  let lastKey = "";
+  // IMPORTANT: use a CanvasCaptureMediaStreamTrack so we can requestFrame()
+  const tmpStream = cropCanvas.captureStream(0); // 0 => manual requestFrame()
+  const track = tmpStream.getVideoTracks()[0];
 
-  function draw(force=false) {
+  localStream = new MediaStream([track]);
+
+  let dirty = true;
+
+  function drawFrame() {
     if (!videoEl.videoWidth || !videoEl.videoHeight) return;
 
     const yaw = normalizeYaw(viewport.yawDeg);
     const pitch = clamp(viewport.pitchDeg, -85, 85);
 
+    // allow VFOV > 90 safely
     const hfov = clamp(parseFloat(hfovEl.value || "120"), 20, 180);
     const vfov = clamp(parseFloat(vfovEl.value || "120"), 20, 160);
-
-    const key = `${yaw.toFixed(2)}|${pitch.toFixed(2)}|${hfov.toFixed(1)}|${vfov.toFixed(1)}|${videoEl.currentTime.toFixed(3)}`;
-    if (!force && key === lastKey) return;
-    lastKey = key;
 
     const srcW = videoEl.videoWidth;
     const srcH = videoEl.videoHeight;
 
-    // black background
+    // black background (forces “only updated region is visible”)
     cropCtx.fillStyle = "black";
     cropCtx.fillRect(0, 0, outW, outH);
 
-    // SOURCE center in pixels
+    // SOURCE crop region (equirect)
     const srcCx = (yaw + 180) / 360 * srcW;
     const srcCy = (90 - pitch) / 180 * srcH;
 
@@ -221,7 +237,7 @@ function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
     let sy = srcCy - srcCropH / 2;
     sy = clamp(sy, 0, srcH - srcCropH);
 
-    // DEST center in output equirect pixels
+    // DEST placement in output equirect (same angular mapping)
     const dstCx = (yaw + 180) / 360 * outW;
     const dstCy = (90 - pitch) / 180 * outH;
 
@@ -232,21 +248,46 @@ function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
     let dy = dstCy - dstCropH / 2;
     dy = clamp(dy, 0, outH - dstCropH);
 
-    drawWrapped(videoEl, cropCtx,
+    drawWrapped(
+      videoEl, cropCtx,
       srcW, srcH,
       sx, sy, srcCropW, srcCropH,
       outW, outH,
-      dx, dy, dstCropW, dstCropH);
+      dx, dy, dstCropW, dstCropH
+    );
+
+    // 🔥 THIS is the critical Brave fix:
+    // force WebRTC to emit a new frame immediately
+    if (typeof track.requestFrame === "function") {
+      cropCtx.fillStyle = "white";
+      cropCtx.fillRect((Date.now() / 10) % outW, 0, 4, 4);
+
+      track.requestFrame();
+    }
   }
 
-  // redraw immediately when Unity updates viewport
-  viewport.onChange = () => draw(true);
+  function loop() {
+    // If video is advancing, we can redraw continuously.
+    // But at minimum, if viewport changed, redraw and request a frame.
+    if (dirty) {
+      dirty = false;
+      drawFrame();
+    }
+    requestAnimationFrame(loop);
+  }
 
-  // keep refreshing as video advances
-  cropTimer = setInterval(() => draw(false), 1000 / fps);
+  // redraw immediately on viewport updates
+  viewport.onChange = () => { dirty = true; };
 
-  return cropCanvas.captureStream(fps);
+  // also force periodic redraw even if viewport is stable (optional safety)
+  cropTimer = setInterval(() => { dirty = true; }, 250);
+
+  requestAnimationFrame(loop);
+
+  return localStream;
 }
+
+
 
 // ---------- Media control ----------
 async function stopMediaOnly(myOp=null) {
