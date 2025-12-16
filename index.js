@@ -299,3 +299,32 @@ wss.on("connection", (ws) => {
     }
   });
 });
+
+
+// --- Keepalive ping/pong (robustez) ---
+function heartbeat() { this.isAlive = true; }
+wss.on("connection", (ws) => {
+  ws.isAlive = true;
+  ws.on("pong", heartbeat);
+});
+
+const pingInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      try { ws.terminate(); } catch {}
+      return;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  });
+}, 15000);
+
+wss.on("close", () => clearInterval(pingInterval));
+
+// --- Health ---
+app.get("/health", (req, res) => res.json({
+  ok: true,
+  robots: robots.size,
+  headsets: headsets.size,
+  now: Date.now()
+}));

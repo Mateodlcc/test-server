@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Unity Simulator (Headset)</title>
+  <style>
+    body{font-family:system-ui;background:#0b1220;color:#e5e7eb;margin:0;padding:16px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    input,select,button{padding:8px 10px;border-radius:10px;border:1px solid #334155;background:#0b1220;color:#e5e7eb}
+    button{cursor:pointer;background:#4f46e5;border:none}
+    video{width:100%;max-width:900px;background:black;border-radius:12px;margin-top:12px}
+    pre{white-space:pre-wrap;background:#0b1220;border:1px solid #334155;border-radius:12px;padding:10px;max-height:260px;overflow:auto}
+  </style>
+</head>
+<body>
+  <h2>Unity Simulator (Headset → WS + WebRTC)</h2>
+
+  <div class="row">
+    <input id="wsUrl" style="flex:1" placeholder="ws(s)://...">
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect">Disconnect</button>
+  </div>
+
+  <div class="row" style="margin-top:10px">
+    <select id="robotList" style="min-width:260px"></select>
+    <button id="btnSelect">Select Robot</button>
+    <button id="btnStart">Start WebRTC</button>
+  </div>
+
+  <div class="row" style="margin-top:10px">
+    <button id="btnSendControl">Send Control (test)</button>
+    <button id="btnSendViewport">Send Viewport (test)</button>
+  </div>
+
+  <video id="vid" autoplay playsinline></video>
+  <pre id="log"></pre>
+
+  <script src="simulador.js"></script>
+</body>
+</html>
