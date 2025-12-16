@@ -14,7 +14,7 @@ app.get("/", (req, res) => res.send("Signal/Control Server Running!"));
 
 /**
  * State:
- * robots: robotId -> { ws, meta, lastSeen }
+ * robots: robotId -> { ws, meta, lastSeen, streamMode }
  * headsets: clientId -> { ws, selectedRobotId, lastControlTs, lastSeq }
  */
 const robots = new Map();
@@ -34,7 +34,8 @@ function snapshotRobots() {
       robotId,
       meta: r.meta || {},
       online: true,
-      lastSeen: r.lastSeen
+      lastSeen: r.lastSeen,
+      streamMode: r.streamMode || "flat2d",
     });
   }
   return out;
@@ -42,12 +43,10 @@ function snapshotRobots() {
 
 /** --- SAFETY BARRIER (edit to your needs) --- */
 function gateControl(headsetState, robotId, controlMsg) {
-  // 1) Must be controlling selected robot
   if (headsetState.selectedRobotId !== robotId) {
     return { ok: false, status: "rejected", reason: "not_selected_robot" };
   }
 
-  // 2) Rate limit (e.g., 30 Hz)
   const t = nowMs();
   const minDt = 1000 / 30;
   if (headsetState.lastControlTs && (t - headsetState.lastControlTs) < minDt) {
@@ -55,7 +54,6 @@ function gateControl(headsetState, robotId, controlMsg) {
   }
   headsetState.lastControlTs = t;
 
-  // 3) Sequence monotonicity (optional)
   if (typeof controlMsg.seq === "number") {
     if (typeof headsetState.lastSeq === "number" && controlMsg.seq <= headsetState.lastSeq) {
       return { ok: false, status: "dropped", reason: "old_seq" };
@@ -63,17 +61,12 @@ function gateControl(headsetState, robotId, controlMsg) {
     headsetState.lastSeq = controlMsg.seq;
   }
 
-  // 4) Clamp joystick values to [-1, 1]
   const clamp = (v) => Math.max(-1, Math.min(1, v));
   const gated = { ...controlMsg };
   if (typeof gated.lx === "number") gated.lx = clamp(gated.lx);
   if (typeof gated.ly === "number") gated.ly = clamp(gated.ly);
   if (typeof gated.rx === "number") gated.rx = clamp(gated.rx);
   if (typeof gated.ry === "number") gated.ry = clamp(gated.ry);
-
-  // 5) Example “deadman switch” (optional):
-  // require a button held to forward motion
-  // if (!gated.deadman) { gated.lx = 0; gated.ly = 0; }
 
   return { ok: true, status: "forwarded", gatedMsg: gated };
 }
@@ -105,7 +98,6 @@ wss.on("connection", (ws) => {
         const robotId = String(msg.robotId || "");
         if (!robotId) { safeSend(ws, { type: "error", reason: "robotId_required" }); return; }
 
-        // Replace existing robot with same id
         if (robots.has(robotId) && robots.get(robotId).ws !== ws) {
           try { robots.get(robotId).ws.close(); } catch {}
         }
@@ -113,14 +105,19 @@ wss.on("connection", (ws) => {
         ws._role = "robot";
         ws._robotId = robotId;
 
-        robots.set(robotId, { ws, meta: msg.meta || {}, lastSeen: nowMs() });
+        const prev = robots.get(robotId);
+        robots.set(robotId, {
+          ws,
+          meta: msg.meta || (prev?.meta || {}),
+          lastSeen: nowMs(),
+          streamMode: prev?.streamMode || "flat2d",
+        });
+
         safeSend(ws, { type: "hello_ok", role: "robot", robotId });
 
-        // notify all headsets list changed
-        for (const [cid, hs] of headsets.entries()) {
+        for (const [, hs] of headsets.entries()) {
           safeSend(hs.ws, { type: "robots", robots: snapshotRobots() });
         }
-
         return;
       }
 
@@ -138,7 +135,6 @@ wss.on("connection", (ws) => {
 
         safeSend(ws, { type: "hello_ok", role: "headset", clientId });
         safeSend(ws, { type: "robots", robots: snapshotRobots() });
-
         return;
       }
 
@@ -170,7 +166,6 @@ wss.on("connection", (ws) => {
           return;
         }
 
-        // detach from previous
         if (hs.selectedRobotId && hs.selectedRobotId !== robotId) {
           detachHeadsetFromRobot(clientId);
         }
@@ -179,6 +174,11 @@ wss.on("connection", (ws) => {
         safeSend(ws, { type: "selected_robot", robotId });
 
         safeSend(robots.get(robotId).ws, { type: "viewer_attached", clientId });
+
+        // 🔥 replay robot's last streamMode so Unity activates the right renderer immediately
+        const mode = robots.get(robotId).streamMode || "flat2d";
+        safeSend(ws, { type: "streamMode", mode });
+
         return;
       }
 
@@ -204,14 +204,20 @@ wss.on("connection", (ws) => {
         const result = gateControl(hs, robotId, msg);
 
         if (!result.ok) {
-          // You can be noisy or silent; I recommend feedback for debugging
           safeSend(ws, { type: "control_status", seq: msg.seq, status: result.status, reason: result.reason });
           return;
         }
 
         safeSend(robots.get(robotId).ws, { ...result.gatedMsg, gated: true });
-        // optional: ack
-        // safeSend(ws, { type: "control_status", seq: msg.seq, status: "forwarded" });
+        return;
+      }
+
+      // ✅ Viewport: headset -> server -> robot (no gating, low rate already on Unity)
+      if (msg.type === "viewport") {
+        const robotId = String(msg.robotId || hs.selectedRobotId || "");
+        if (!robotId || !robots.has(robotId)) return;
+
+        safeSend(robots.get(robotId).ws, msg);
         return;
       }
 
@@ -224,10 +230,9 @@ wss.on("connection", (ws) => {
       const r = robots.get(robotId);
       if (r) r.lastSeen = nowMs();
 
-      // WebRTC signaling from robot -> the headset that selected it
+      // WebRTC signaling from robot -> the headset(s) that selected it
       if (msg.type === "answer" || msg.type === "candidate") {
-        // Find all headsets currently monitoring this robot (usually 1)
-        for (const [cid, hs] of headsets.entries()) {
+        for (const [, hs] of headsets.entries()) {
           if (hs.selectedRobotId === robotId) {
             safeSend(hs.ws, { ...msg });
           }
@@ -235,9 +240,11 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // Robot can push stream format to the headset(s)
-      if (msg.type === "streamFormat") {
-        for (const [cid, hs] of headsets.entries()) {
+      // ✅ Robot announces current stream mode (flat2d/full360/crop360)
+      if (msg.type === "streamMode") {
+        if (r) r.streamMode = msg.mode;
+
+        for (const [, hs] of headsets.entries()) {
           if (hs.selectedRobotId === robotId) {
             safeSend(hs.ws, msg);
           }
@@ -245,9 +252,23 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // Optional: robot telemetry to headset(s)
+      // Backwards compatibility: if you still send streamFormat, map it
+      if (msg.type === "streamFormat") {
+        const mapped = (msg.format === "full360") ? "full360" :
+                       (msg.format === "crop360") ? "crop360" : "flat2d";
+        if (r) r.streamMode = mapped;
+
+        for (const [, hs] of headsets.entries()) {
+          if (hs.selectedRobotId === robotId) {
+            safeSend(hs.ws, { type: "streamMode", mode: mapped });
+          }
+        }
+        return;
+      }
+
+      // telemetry passthrough
       if (msg.type === "telemetry") {
-        for (const [cid, hs] of headsets.entries()) {
+        for (const [, hs] of headsets.entries()) {
           if (hs.selectedRobotId === robotId) {
             safeSend(hs.ws, msg);
           }
@@ -260,14 +281,11 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    // cleanup
     if (ws._role === "robot" && ws._robotId) {
       robots.delete(ws._robotId);
 
-      // notify headsets that list changed
-      for (const [cid, hs] of headsets.entries()) {
+      for (const [, hs] of headsets.entries()) {
         safeSend(hs.ws, { type: "robots", robots: snapshotRobots() });
-        // if someone was watching that robot, tell them
         if (hs.selectedRobotId === ws._robotId) {
           hs.selectedRobotId = null;
           safeSend(hs.ws, { type: "publisher_left", robotId: ws._robotId });

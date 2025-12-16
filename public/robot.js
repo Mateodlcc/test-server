@@ -197,7 +197,7 @@ function startBlackEquirectWithViewport(videoEl, outW=2048, outH=1024, fps=30) {
     const pitch = clamp(viewport.pitchDeg, -85, 85);
 
     const hfov = clamp(parseFloat(hfovEl.value || "120"), 20, 180);
-    const vfov = clamp(parseFloat(vfovEl.value || "140"), 20, 160);
+    const vfov = clamp(parseFloat(vfovEl.value || "120"), 20, 160);
 
     const key = `${yaw.toFixed(2)}|${pitch.toFixed(2)}|${hfov.toFixed(1)}|${vfov.toFixed(1)}|${videoEl.currentTime.toFixed(3)}`;
     if (!force && key === lastKey) return;
