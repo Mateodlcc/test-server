@@ -213,7 +213,7 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
     if (!videoEl.videoWidth || !videoEl.videoHeight) return;
 
     const yaw = normalizeYaw(-viewport.yawDeg);
-    const pitch = clamp(viewport.pitchDeg, -85, 85);
+    const pitch = clamp(-viewport.pitchDeg, -85, 85);
 
     // allow VFOV > 90 safely
     const hfov = clamp(parseFloat(hfovEl.value || "120"), 20, 180);
