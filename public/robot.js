@@ -222,6 +222,10 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
     const srcW = videoEl.videoWidth;
     const srcH = videoEl.videoHeight;
 
+    // black background (forces “only updated region is visible”)
+    cropCtx.fillStyle = "black";
+    cropCtx.fillRect(0, 0, outW, outH);
+
     // SOURCE crop region (equirect)
     const srcCx = (yaw + 180) / 360 * srcW;
     const srcCy = (90 - pitch) / 180 * srcH;
@@ -252,12 +256,8 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
       dx, dy, dstCropW, dstCropH
     );
 
-    // 🔥 THIS is the critical Brave fix:
-    // force WebRTC to emit a new frame immediately
-    if (typeof track.requestFrame === "function") {
-      cropCtx.fillStyle = "white";
-      cropCtx.fillRect((Date.now() / 10) % outW, 0, 4, 4);
 
+    if (typeof track.requestFrame === "function") {
       track.requestFrame();
     }
   }
