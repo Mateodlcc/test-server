@@ -72,9 +72,17 @@ let cropTimer = null;
 // viewport request from Unity (yaw/pitch)
 const viewport = { yawDeg: 0, pitchDeg: 0, onChange: null };
 
-// stats
-let controlCount = 0;
+// stats / latest control state
+let countPose = 0;
+let countJoy = 0;
+let countBtn = 0;
 let lastControlAt = 0;
+
+const latest = {
+  pose: { roll: 0, pitch: 0, yaw: 0 },
+  joy:  { x: 0, y: 0 },
+  btn:  {} // id -> v
+};
 
 function sendWs(obj) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -188,7 +196,6 @@ function drawWrapped(video, ctx,
 function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
   stopCropLoop();
 
-  // Create + attach hidden canvas (Brave can optimize unattached canvases)
   cropCanvas = document.createElement("canvas");
   cropCanvas.width = outW;
   cropCanvas.height = outH;
@@ -202,10 +209,8 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
 
   cropCtx = cropCanvas.getContext("2d", { alpha: false });
 
-  // IMPORTANT: use a CanvasCaptureMediaStreamTrack so we can requestFrame()
-  const tmpStream = cropCanvas.captureStream(0); // 0 => manual requestFrame()
+  const tmpStream = cropCanvas.captureStream(0); // manual requestFrame()
   const track = tmpStream.getVideoTracks()[0];
-
   localStream = new MediaStream([track]);
 
   let dirty = true;
@@ -216,18 +221,15 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
     const yaw = normalizeYaw(viewport.yawDeg);
     const pitch = clamp(viewport.pitchDeg, -85, 85);
 
-    // allow VFOV > 90 safely
     const hfov = clamp(parseFloat(hfovEl.value || "120"), 20, 180);
     const vfov = clamp(parseFloat(vfovEl.value || "120"), 20, 160);
 
     const srcW = videoEl.videoWidth;
     const srcH = videoEl.videoHeight;
 
-    // black background (forces “only updated region is visible”)
     cropCtx.fillStyle = "black";
     cropCtx.fillRect(0, 0, outW, outH);
 
-    // SOURCE crop region (equirect)
     const srcCx = (yaw + 180) / 360 * srcW;
     const srcCy = (90 - pitch) / 180 * srcH;
 
@@ -238,7 +240,6 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
     let sy = srcCy - srcCropH / 2;
     sy = clamp(sy, 0, srcH - srcCropH);
 
-    // DEST placement in output equirect (same angular mapping)
     const dstCx = (yaw + 180) / 360 * outW;
     const dstCy = (90 - pitch) / 180 * outH;
 
@@ -257,15 +258,12 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
       dx, dy, dstCropW, dstCropH
     );
 
-
     if (typeof track.requestFrame === "function") {
       track.requestFrame();
     }
   }
 
   function loop() {
-    // If video is advancing, we can redraw continuously.
-    // But at minimum, if viewport changed, redraw and request a frame.
     if (dirty) {
       dirty = false;
       drawFrame();
@@ -273,18 +271,13 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
     requestAnimationFrame(loop);
   }
 
-  // redraw immediately on viewport updates
   viewport.onChange = () => { dirty = true; };
-
-  // also force periodic redraw even if viewport is stable (optional safety)
   cropTimer = setInterval(() => { dirty = true; }, 250);
 
   requestAnimationFrame(loop);
 
   return localStream;
 }
-
-
 
 // ---------- Media control ----------
 async function stopMediaOnly(myOp=null) {
@@ -375,12 +368,10 @@ async function applyModeAndStartMedia() {
         sendUnityRenderMode();
         setStatus(mediaStatusEl, "Media: 360 (skybox)", "ok");
       } else {
-        // crop360: full equirect output with black fill
-        // Use 4096x2048 for 360.mp4 (1920x1080), or 8192x4096 for 360_2.mp4 (3840x2160)
         const isHighRes = video360Sel.value === "360_2";
         const canvasW = isHighRes ? 8192 : 4096;
         const canvasH = isHighRes ? 4096 : 2048;
-        localStream = startBlackEquirectWithViewport(video360El, canvasW, canvasH, 60);
+        localStream = startBlackEquirectWithViewport(video360El, canvasW, canvasH);
         preview.srcObject = localStream;
 
         sendUnityRenderMode();
@@ -453,7 +444,7 @@ btnConnect.onclick = () => {
     btnStopAll.disabled = false;
 
     sendWs({ type:"hello", role:"robot", robotId: robotIdEl.value.trim(), meta:{ name:"Browser Robot Sim" } });
-    selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | controls: 0 | last: ∞`;
+    selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | pose: 0 | joy: 0 | btn: 0 | last: ∞`;
 
     log(sigLog, "Connected. Start media, then select this robot in Unity.");
   };
@@ -463,10 +454,35 @@ btnConnect.onclick = () => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
 
+    // --- NEW split controls ---
+    if (msg.type === "pose") {
+      countPose++; lastControlAt = Date.now();
+      latest.pose.roll = msg.roll ?? latest.pose.roll;
+      latest.pose.pitch = msg.pitch ?? latest.pose.pitch;
+      latest.pose.yaw = msg.yaw ?? latest.pose.yaw;
+      log(controlsLog, `POSE r=${latest.pose.roll.toFixed?.(2) ?? latest.pose.roll} p=${latest.pose.pitch.toFixed?.(2) ?? latest.pose.pitch} y=${latest.pose.yaw.toFixed?.(2) ?? latest.pose.yaw}`);
+      return;
+    }
+
+    if (msg.type === "joy") {
+      countJoy++; lastControlAt = Date.now();
+      latest.joy.x = msg.x ?? latest.joy.x;
+      latest.joy.y = msg.y ?? latest.joy.y;
+      log(controlsLog, `JOY x=${latest.joy.x.toFixed?.(3) ?? latest.joy.x} y=${latest.joy.y.toFixed?.(3) ?? latest.joy.y}`);
+      return;
+    }
+
+    if (msg.type === "btn") {
+      countBtn++; lastControlAt = Date.now();
+      latest.btn[msg.id] = msg.v;
+      log(controlsLog, `BTN ${msg.id}=${msg.v}`);
+      return;
+    }
+
+    // legacy support (optional): if something still sends "control"
     if (msg.type === "control") {
-      controlCount++;
       lastControlAt = Date.now();
-      log(controlsLog, JSON.stringify(msg));
+      log(controlsLog, "LEGACY control: " + JSON.stringify(msg));
       return;
     }
 
@@ -475,7 +491,6 @@ btnConnect.onclick = () => {
       if (typeof msg.yawDeg === "number") viewport.yawDeg = msg.yawDeg;
       if (typeof msg.pitchDeg === "number") viewport.pitchDeg = msg.pitchDeg;
 
-      // allow Unity to drive crop FOV
       if (typeof msg.hfovDeg === "number") hfovEl.value = msg.hfovDeg;
       if (typeof msg.vfovDeg === "number") vfovEl.value = msg.vfovDeg;
 
@@ -487,6 +502,8 @@ btnConnect.onclick = () => {
     if (msg.type === "candidate") { await handleCandidate(msg); return; }
 
     if (msg.type === "hello_ok") { log(sigLog, "hello_ok"); return; }
+    if (msg.type === "viewer_attached") { log(sigLog, "viewer_attached"); return; }
+    if (msg.type === "viewer_detached") { log(sigLog, "viewer_detached"); return; }
   };
 
   ws.onerror = () => setStatus(wsStatusEl, "WS: error", "bad");
@@ -507,7 +524,8 @@ btnStopAll.onclick = cleanupAll;
 setInterval(() => {
   const ageMs = lastControlAt ? (Date.now() - lastControlAt) : null;
   const ageTxt = ageMs == null ? "∞" : (ageMs/1000).toFixed(2) + "s";
-  selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | controls: ${controlCount} | last: ${ageTxt}`;
+  selStatusEl.textContent =
+    `robotId: ${robotIdEl.value.trim()} | pose: ${countPose} | joy: ${countJoy} | btn: ${countBtn} | last: ${ageTxt}`;
 }, 250);
 
 window.addEventListener("beforeunload", () => cleanupAll());
