@@ -3,7 +3,7 @@
 // - UI dashboard
 // - Viewport joystick
 // - Multi-robot fix: reset PeerConnection when switching robots
-// - UPDATED: Split control test (pose/joy/btn) instead of legacy "control"
+// - UPDATED: viewport (head crop alignment), joy (both sticks + triggers), btn edges
 // ======================
 
 // Elements
@@ -242,46 +242,37 @@ btnSendControl.onclick = ()=>{
     return;
   }
 
-  // 1) pose (example)
+  // Viewport (head-aligned crop window)
   send({
-    type:"pose",
+    type:"viewport",
     robotId: selectedRobotId,
-    roll: 0,
-    pitch: 0,
-    yaw: 15,
-    ts: performance.now() / 1000
+    yawDeg: 20,
+    pitchDeg: -8,
+    hfovDeg: Number(hfovEl.value || 120),
+    vfovDeg: Number(vfovEl.value || 120),
   });
 
-  // 2) joystick (example)
+  // Joy: both sticks + triggers
   send({
     type:"joy",
     robotId: selectedRobotId,
-    x: 0.2,
-    y: -0.1,
+    lx: 0.20, ly: -0.10,
+    rx: -0.30, ry: 0.05,
+    lt: 0.65, rt: 0.10,
     ts: performance.now() / 1000
   });
 
-  // 3) button edge: A press then release
-  send({
-    type:"btn",
-    robotId: selectedRobotId,
-    id: "A",
-    v: 1,
-    ts: performance.now() / 1000
-  });
+  // Button edge: A press then release
+  send({ type:"btn", robotId:selectedRobotId, id:"A",  v:1, ts: performance.now()/1000 });
+  setTimeout(()=> send({ type:"btn", robotId:selectedRobotId, id:"A", v:0, ts: performance.now()/1000 }), 150);
 
-  setTimeout(()=>{
-    send({
-      type:"btn",
-      robotId: selectedRobotId,
-      id: "A",
-      v: 0,
-      ts: performance.now() / 1000
-    });
-  }, 150);
+  // Trigger edge example
+  send({ type:"btn", robotId:selectedRobotId, id:"RT", v:1, ts: performance.now()/1000 });
+  setTimeout(()=> send({ type:"btn", robotId:selectedRobotId, id:"RT", v:0, ts: performance.now()/1000 }), 150);
 };
 
 btnSendViewport.onclick = ()=>{
+  if (!selectedRobotId) return;
   send({
     type:"viewport",
     robotId: selectedRobotId,
@@ -313,14 +304,12 @@ function drawJoy(){
   const cx = w/2, cy = h/2;
   const R = Math.min(w,h)*0.42;
 
-  // base circle
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, Math.PI*2);
   ctx.strokeStyle = "#334155";
   ctx.lineWidth = 3;
   ctx.stroke();
 
-  // crosshair
   ctx.beginPath();
   ctx.moveTo(cx-R, cy); ctx.lineTo(cx+R, cy);
   ctx.moveTo(cx, cy-R); ctx.lineTo(cx, cy+R);
@@ -328,7 +317,6 @@ function drawJoy(){
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  // knob
   const kx = cx + knob.x * R;
   const ky = cy + knob.y * R;
 

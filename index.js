@@ -15,7 +15,7 @@ app.get("/", (req, res) => res.send("Signal/Control Server Running!"));
 /**
  * State:
  * robots: robotId -> { ws, meta, lastSeen, streamMode }
- * headsets: clientId -> { ws, selectedRobotId, lastPoseTs, lastJoyTs }
+ * headsets: clientId -> { ws, selectedRobotId, lastJoyTs, lastViewportTs }
  */
 const robots = new Map();
 const headsets = new Map();
@@ -52,7 +52,6 @@ function detachHeadsetFromRobot(clientId) {
   }
 }
 
-/** --- Helpers / gates --- */
 function requireSelectedRobot(hs, robotId) {
   if (!robotId) return { ok: false, reason: "no_robotId" };
   if (!robots.has(robotId)) return { ok: false, reason: "robot_not_online" };
@@ -65,36 +64,9 @@ function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
-function gatePose(hs, msg) {
-  // allow up to 30 Hz (Unity sends coalesced anyway)
-  const t = nowMs();
-  const minDt = 1000 / 30;
-  if (hs.lastPoseTs && (t - hs.lastPoseTs) < minDt) {
-    return { ok: false, reason: "rate_limited_pose" };
-  }
-  hs.lastPoseTs = t;
-
-  const roll = clamp(Number(msg.roll), -180, 180);
-  const pitch = clamp(Number(msg.pitch), -180, 180);
-  const yaw = clamp(Number(msg.yaw), -180, 180);
-
-  if ([roll, pitch, yaw].some((x) => Number.isNaN(x))) {
-    return { ok: false, reason: "invalid_pose" };
-  }
-
-  return {
-    ok: true,
-    gatedMsg: {
-      type: "pose",
-      robotId: msg.robotId,
-      roll, pitch, yaw,
-      ts: typeof msg.ts === "number" ? msg.ts : undefined
-    }
-  };
-}
-
+/** joy: both sticks + triggers */
 function gateJoy(hs, msg) {
-  // allow up to 90 Hz (joystick needs responsiveness)
+  // allow up to 90 Hz
   const t = nowMs();
   const minDt = 1000 / 90;
   if (hs.lastJoyTs && (t - hs.lastJoyTs) < minDt) {
@@ -102,10 +74,15 @@ function gateJoy(hs, msg) {
   }
   hs.lastJoyTs = t;
 
-  const x = clamp(Number(msg.x), -1, 1);
-  const y = clamp(Number(msg.y), -1, 1);
+  const lx = clamp(Number(msg.lx), -1, 1);
+  const ly = clamp(Number(msg.ly), -1, 1);
+  const rx = clamp(Number(msg.rx), -1, 1);
+  const ry = clamp(Number(msg.ry), -1, 1);
 
-  if ([x, y].some((v) => Number.isNaN(v))) {
+  const lt = (msg.lt === undefined || msg.lt === null) ? 0 : clamp(Number(msg.lt), 0, 1);
+  const rt = (msg.rt === undefined || msg.rt === null) ? 0 : clamp(Number(msg.rt), 0, 1);
+
+  if ([lx, ly, rx, ry, lt, rt].some((v) => Number.isNaN(v))) {
     return { ok: false, reason: "invalid_joy" };
   }
 
@@ -114,16 +91,16 @@ function gateJoy(hs, msg) {
     gatedMsg: {
       type: "joy",
       robotId: msg.robotId,
-      x, y,
+      lx, ly, rx, ry, lt, rt,
       ts: typeof msg.ts === "number" ? msg.ts : undefined
     }
   };
 }
 
+/** btn: edge press/release */
 function gateBtn(_hs, msg) {
   const id = String(msg.id || "").slice(0, 32);
   const v = (msg.v === 1 || msg.v === "1" || msg.v === true) ? 1 : 0;
-
   if (!id) return { ok: false, reason: "invalid_btn_id" };
 
   return {
@@ -138,7 +115,39 @@ function gateBtn(_hs, msg) {
   };
 }
 
-/** --- WS --- */
+/** viewport: head-aligned crop window */
+function gateViewport(hs, msg) {
+  // allow up to 60 Hz (head tracking)
+  const t = nowMs();
+  const minDt = 1000 / 60;
+  if (hs.lastViewportTs && (t - hs.lastViewportTs) < minDt) {
+    return { ok: false, reason: "rate_limited_viewport" };
+  }
+  hs.lastViewportTs = t;
+
+  const yawDeg = clamp(Number(msg.yawDeg), -180, 180);
+  const pitchDeg = clamp(Number(msg.pitchDeg), -89, 89);
+
+  const hfovDeg = clamp(Number(msg.hfovDeg), 20, 180);
+  const vfovDeg = clamp(Number(msg.vfovDeg), 20, 160);
+
+  if ([yawDeg, pitchDeg, hfovDeg, vfovDeg].some((v) => Number.isNaN(v))) {
+    return { ok: false, reason: "invalid_viewport" };
+  }
+
+  return {
+    ok: true,
+    gatedMsg: {
+      type: "viewport",
+      robotId: msg.robotId,
+      yawDeg,
+      pitchDeg,
+      hfovDeg,
+      vfovDeg
+    }
+  };
+}
+
 wss.on("connection", (ws) => {
   ws._role = null;
   ws._robotId = null;
@@ -186,8 +195,8 @@ wss.on("connection", (ws) => {
         headsets.set(clientId, {
           ws,
           selectedRobotId: null,
-          lastPoseTs: 0,
           lastJoyTs: 0,
+          lastViewportTs: 0,
         });
 
         safeSend(ws, { type: "hello_ok", role: "headset", clientId });
@@ -232,7 +241,7 @@ wss.on("connection", (ws) => {
 
         safeSend(robots.get(robotId).ws, { type: "viewer_attached", clientId });
 
-        // Replay robot's last streamMode so Unity activates the right renderer immediately
+        // Replay last streamMode so the headset UI can switch renderers immediately
         const mode = robots.get(robotId).streamMode || "flat2d";
         safeSend(ws, { type: "streamMode", mode });
 
@@ -250,36 +259,45 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // ✅ Split controls: pose/joy/btn (headset -> server -> robot)
-      if (msg.type === "pose" || msg.type === "joy" || msg.type === "btn") {
+      // Locomotion: joy
+      if (msg.type === "joy") {
         const robotId = String(msg.robotId || hs.selectedRobotId || "");
         const req = requireSelectedRobot(hs, robotId);
-        if (!req.ok) {
-          // keep quiet (avoid spam), but you can uncomment for debugging:
-          // safeSend(ws, { type:"error", reason:req.reason });
-          return;
-        }
+        if (!req.ok) return;
 
         msg.robotId = robotId;
-
-        let gated;
-        if (msg.type === "pose") gated = gatePose(hs, msg);
-        else if (msg.type === "joy") gated = gateJoy(hs, msg);
-        else gated = gateBtn(hs, msg);
-
+        const gated = gateJoy(hs, msg);
         if (!gated.ok) return;
 
         safeSend(robots.get(robotId).ws, gated.gatedMsg);
         return;
       }
 
-      // ✅ Viewport: headset -> server -> robot (already throttled on sender)
+      // Buttons: edge press/release
+      if (msg.type === "btn") {
+        const robotId = String(msg.robotId || hs.selectedRobotId || "");
+        const req = requireSelectedRobot(hs, robotId);
+        if (!req.ok) return;
+
+        msg.robotId = robotId;
+        const gated = gateBtn(hs, msg);
+        if (!gated.ok) return;
+
+        safeSend(robots.get(robotId).ws, gated.gatedMsg);
+        return;
+      }
+
+      // Head-aligned crop window: viewport
       if (msg.type === "viewport") {
         const robotId = String(msg.robotId || hs.selectedRobotId || "");
-        if (!robotId || !robots.has(robotId)) return;
-        if (hs.selectedRobotId !== robotId) return;
+        const req = requireSelectedRobot(hs, robotId);
+        if (!req.ok) return;
 
-        safeSend(robots.get(robotId).ws, msg);
+        msg.robotId = robotId;
+        const gated = gateViewport(hs, msg);
+        if (!gated.ok) return;
+
+        safeSend(robots.get(robotId).ws, gated.gatedMsg);
         return;
       }
 
@@ -292,7 +310,7 @@ wss.on("connection", (ws) => {
       const r = robots.get(robotId);
       if (r) r.lastSeen = nowMs();
 
-      // WebRTC signaling from robot -> the headset(s) that selected it
+      // WebRTC signaling from robot -> headsets that selected it
       if (msg.type === "answer" || msg.type === "candidate") {
         for (const [, hs] of headsets.entries()) {
           if (hs.selectedRobotId === robotId) safeSend(hs.ws, { ...msg });
@@ -322,7 +340,7 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // telemetry passthrough
+      // Telemetry passthrough
       if (msg.type === "telemetry") {
         for (const [, hs] of headsets.entries()) {
           if (hs.selectedRobotId === robotId) safeSend(hs.ws, msg);
@@ -354,7 +372,7 @@ wss.on("connection", (ws) => {
   });
 });
 
-// --- Keepalive ping/pong (robustez) ---
+// --- Keepalive ping/pong ---
 function heartbeat() { this.isAlive = true; }
 wss.on("connection", (ws) => {
   ws.isAlive = true;
@@ -374,7 +392,6 @@ const pingInterval = setInterval(() => {
 
 wss.on("close", () => clearInterval(pingInterval));
 
-// --- Health ---
 app.get("/health", (req, res) => res.json({
   ok: true,
   robots: robots.size,

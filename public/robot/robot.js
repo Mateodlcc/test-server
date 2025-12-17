@@ -73,15 +73,15 @@ let cropTimer = null;
 const viewport = { yawDeg: 0, pitchDeg: 0, onChange: null };
 
 // stats / latest control state
-let countPose = 0;
+let countViewport = 0;
 let countJoy = 0;
 let countBtn = 0;
 let lastControlAt = 0;
 
 const latest = {
-  pose: { roll: 0, pitch: 0, yaw: 0 },
-  joy:  { x: 0, y: 0 },
-  btn:  {} // id -> v
+  viewport: { yawDeg: 0, pitchDeg: 0, hfovDeg: 120, vfovDeg: 120 },
+  joy: { lx:0, ly:0, rx:0, ry:0, lt:0, rt:0 },
+  btn: {} // id -> v
 };
 
 function sendWs(obj) {
@@ -444,7 +444,7 @@ btnConnect.onclick = () => {
     btnStopAll.disabled = false;
 
     sendWs({ type:"hello", role:"robot", robotId: robotIdEl.value.trim(), meta:{ name:"Browser Robot Sim" } });
-    selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | pose: 0 | joy: 0 | btn: 0 | last: ∞`;
+    selStatusEl.textContent = `robotId: ${robotIdEl.value.trim()} | vp:0 | joy:0 | btn:0 | last: ∞`;
 
     log(sigLog, "Connected. Start media, then select this robot in Unity.");
   };
@@ -454,21 +454,44 @@ btnConnect.onclick = () => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
 
-    // --- NEW split controls ---
-    if (msg.type === "pose") {
-      countPose++; lastControlAt = Date.now();
-      latest.pose.roll = msg.roll ?? latest.pose.roll;
-      latest.pose.pitch = msg.pitch ?? latest.pose.pitch;
-      latest.pose.yaw = msg.yaw ?? latest.pose.yaw;
-      log(controlsLog, `POSE r=${latest.pose.roll.toFixed?.(2) ?? latest.pose.roll} p=${latest.pose.pitch.toFixed?.(2) ?? latest.pose.pitch} y=${latest.pose.yaw.toFixed?.(2) ?? latest.pose.yaw}`);
+    if (msg.type === "viewport") {
+      countViewport++; lastControlAt = Date.now();
+
+      if (typeof msg.yawDeg === "number") viewport.yawDeg = msg.yawDeg;
+      if (typeof msg.pitchDeg === "number") viewport.pitchDeg = msg.pitchDeg;
+
+      if (typeof msg.hfovDeg === "number") hfovEl.value = msg.hfovDeg;
+      if (typeof msg.vfovDeg === "number") vfovEl.value = msg.vfovDeg;
+
+      latest.viewport.yawDeg = viewport.yawDeg;
+      latest.viewport.pitchDeg = viewport.pitchDeg;
+      latest.viewport.hfovDeg = Number(hfovEl.value || 120);
+      latest.viewport.vfovDeg = Number(vfovEl.value || 120);
+
+      if (viewport.onChange) viewport.onChange();
+
+      log(controlsLog,
+        `VIEWPORT yaw=${latest.viewport.yawDeg.toFixed(1)} pitch=${latest.viewport.pitchDeg.toFixed(1)} ` +
+        `hfov=${latest.viewport.hfovDeg.toFixed(0)} vfov=${latest.viewport.vfovDeg.toFixed(0)}`
+      );
       return;
     }
 
     if (msg.type === "joy") {
       countJoy++; lastControlAt = Date.now();
-      latest.joy.x = msg.x ?? latest.joy.x;
-      latest.joy.y = msg.y ?? latest.joy.y;
-      log(controlsLog, `JOY x=${latest.joy.x.toFixed?.(3) ?? latest.joy.x} y=${latest.joy.y.toFixed?.(3) ?? latest.joy.y}`);
+
+      latest.joy.lx = msg.lx ?? latest.joy.lx;
+      latest.joy.ly = msg.ly ?? latest.joy.ly;
+      latest.joy.rx = msg.rx ?? latest.joy.rx;
+      latest.joy.ry = msg.ry ?? latest.joy.ry;
+      latest.joy.lt = msg.lt ?? latest.joy.lt;
+      latest.joy.rt = msg.rt ?? latest.joy.rt;
+
+      log(controlsLog,
+        `JOY L=(${latest.joy.lx.toFixed(3)}, ${latest.joy.ly.toFixed(3)}) ` +
+        `R=(${latest.joy.rx.toFixed(3)}, ${latest.joy.ry.toFixed(3)}) ` +
+        `T=(lt:${latest.joy.lt.toFixed(3)} rt:${latest.joy.rt.toFixed(3)})`
+      );
       return;
     }
 
@@ -476,25 +499,6 @@ btnConnect.onclick = () => {
       countBtn++; lastControlAt = Date.now();
       latest.btn[msg.id] = msg.v;
       log(controlsLog, `BTN ${msg.id}=${msg.v}`);
-      return;
-    }
-
-    // legacy support (optional): if something still sends "control"
-    if (msg.type === "control") {
-      lastControlAt = Date.now();
-      log(controlsLog, "LEGACY control: " + JSON.stringify(msg));
-      return;
-    }
-
-    // viewport from Unity for crop360
-    if (msg.type === "viewport") {
-      if (typeof msg.yawDeg === "number") viewport.yawDeg = msg.yawDeg;
-      if (typeof msg.pitchDeg === "number") viewport.pitchDeg = msg.pitchDeg;
-
-      if (typeof msg.hfovDeg === "number") hfovEl.value = msg.hfovDeg;
-      if (typeof msg.vfovDeg === "number") vfovEl.value = msg.vfovDeg;
-
-      if (viewport.onChange) viewport.onChange();
       return;
     }
 
@@ -520,12 +524,11 @@ btnDisconnect.onclick = () => {
 btnStartMedia.onclick = async () => { await applyModeAndStartMedia(); };
 btnStopAll.onclick = cleanupAll;
 
-// status freshness
 setInterval(() => {
   const ageMs = lastControlAt ? (Date.now() - lastControlAt) : null;
   const ageTxt = ageMs == null ? "∞" : (ageMs/1000).toFixed(2) + "s";
   selStatusEl.textContent =
-    `robotId: ${robotIdEl.value.trim()} | pose: ${countPose} | joy: ${countJoy} | btn: ${countBtn} | last: ${ageTxt}`;
+    `robotId: ${robotIdEl.value.trim()} | vp:${countViewport} | joy:${countJoy} | btn:${countBtn} | last: ${ageTxt}`;
 }, 250);
 
 window.addEventListener("beforeunload", () => cleanupAll());
