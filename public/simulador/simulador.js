@@ -1,9 +1,11 @@
 // ======================
 // Unity Simulator (Headset) - WS + WebRTC
-// - UI dashboard
-// - Viewport joystick
-// - Multi-robot fix: reset PeerConnection when switching robots
-// - UPDATED: viewport (head crop alignment), joy (both sticks + triggers), btn edges
+// - Two joysticks:
+//   * joyViewport -> sends type:"viewport" (head crop alignment)
+//   * joyMove     -> sends type:"joy" (locomotion lx/ly) continuously while dragging
+// - Controller button testing:
+//   * pretty toggles that send btn press/release
+//   * triggers sliders feed lt/rt into joy messages
 // ======================
 
 // Elements
@@ -16,7 +18,8 @@ const btnStart = document.getElementById("btnStart");
 const btnSendControl = document.getElementById("btnSendControl");
 const btnSendViewport = document.getElementById("btnSendViewport");
 const btnClearLog = document.getElementById("btnClearLog");
-const btnCenter = document.getElementById("btnCenter");
+const btnCenterViewport = document.getElementById("btnCenterViewport");
+const btnCenterMove = document.getElementById("btnCenterMove");
 
 const vid = document.getElementById("vid");
 const logEl = document.getElementById("log");
@@ -25,13 +28,23 @@ const wsStateEl = document.getElementById("wsState");
 const pcStateEl = document.getElementById("pcState");
 
 // Viewport UI
-const joy = document.getElementById("joy");
-const ctx = joy.getContext("2d");
+const joyViewport = document.getElementById("joyViewport");
+const ctxVp = joyViewport.getContext("2d");
 const vpStateEl = document.getElementById("vpState");
 const yawRangeEl = document.getElementById("yawRange");
 const pitchRangeEl = document.getElementById("pitchRange");
 const hfovEl = document.getElementById("hfov");
 const vfovEl = document.getElementById("vfov");
+
+// Movement UI
+const joyMove = document.getElementById("joyMove");
+const ctxMv = joyMove.getContext("2d");
+const moveStateEl = document.getElementById("moveState");
+const ltSlider = document.getElementById("ltSlider");
+const rtSlider = document.getElementById("rtSlider");
+const ltVal = document.getElementById("ltVal");
+const rtVal = document.getElementById("rtVal");
+const btnPads = Array.from(document.querySelectorAll(".btnpad"));
 
 // Helpers
 function log(s){
@@ -55,6 +68,15 @@ let ws = null;
 let pc = null;
 let selectedRobotId = null;
 let clientId = "sim-headset";
+
+// Latest movement + triggers state
+const joyState = {
+  lx: 0, ly: 0,
+  rx: 0, ry: 0,
+  lt: 0, rt: 0,
+};
+
+const btnState = new Map(); // id -> 0/1
 
 // --- WS send ---
 function send(obj){
@@ -235,14 +257,14 @@ btnStart.onclick = async ()=>{
   }
 };
 
-// --- Test messages (UPDATED) ---
+// --- Test messages ---
 btnSendControl.onclick = ()=>{
   if (!selectedRobotId){
     log("Selecciona robot primero");
     return;
   }
 
-  // Viewport (head-aligned crop window)
+  // viewport (head crop alignment)
   send({
     type:"viewport",
     robotId: selectedRobotId,
@@ -252,23 +274,19 @@ btnSendControl.onclick = ()=>{
     vfovDeg: Number(vfovEl.value || 120),
   });
 
-  // Joy: both sticks + triggers
+  // joy (both sticks + triggers)
   send({
     type:"joy",
     robotId: selectedRobotId,
     lx: 0.20, ly: -0.10,
     rx: -0.30, ry: 0.05,
-    lt: 0.65, rt: 0.10,
+    lt: joyState.lt, rt: joyState.rt,
     ts: performance.now() / 1000
   });
 
-  // Button edge: A press then release
-  send({ type:"btn", robotId:selectedRobotId, id:"A",  v:1, ts: performance.now()/1000 });
+  // button edge example
+  send({ type:"btn", robotId:selectedRobotId, id:"A", v:1, ts: performance.now()/1000 });
   setTimeout(()=> send({ type:"btn", robotId:selectedRobotId, id:"A", v:0, ts: performance.now()/1000 }), 150);
-
-  // Trigger edge example
-  send({ type:"btn", robotId:selectedRobotId, id:"RT", v:1, ts: performance.now()/1000 });
-  setTimeout(()=> send({ type:"btn", robotId:selectedRobotId, id:"RT", v:0, ts: performance.now()/1000 }), 150);
 };
 
 btnSendViewport.onclick = ()=>{
@@ -289,27 +307,42 @@ btnClearLog.onclick = ()=>{
 };
 
 // ======================
-// Viewport joystick
+// Shared helpers
 // ======================
-let dragging = false;
-let knob = { x: 0, y: 0 }; // normalized [-1,1]
-let lastSent = 0;
-
 function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
 
-function drawJoy(){
-  const w = joy.width, h = joy.height;
+function setMoveStateText(){
+  moveStateEl.textContent =
+`lx: ${joyState.lx.toFixed(3)}
+ly: ${joyState.ly.toFixed(3)}
+rx: ${joyState.rx.toFixed(3)}
+ry: ${joyState.ry.toFixed(3)}
+lt: ${joyState.lt.toFixed(3)}
+rt: ${joyState.rt.toFixed(3)}`;
+}
+
+// ======================
+// VIEWPORT JOYSTICK (head crop alignment)
+// ======================
+let draggingVp = false;
+let knobVp = { x: 0, y: 0 }; // normalized [-1,1]
+let lastVpSent = 0;
+
+function drawJoy(ctx, canvas, knob){
+  const w = canvas.width, h = canvas.height;
   ctx.clearRect(0,0,w,h);
 
   const cx = w/2, cy = h/2;
   const R = Math.min(w,h)*0.42;
 
+  // base circle
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, Math.PI*2);
   ctx.strokeStyle = "#334155";
   ctx.lineWidth = 3;
   ctx.stroke();
 
+  // crosshair
   ctx.beginPath();
   ctx.moveTo(cx-R, cy); ctx.lineTo(cx+R, cy);
   ctx.moveTo(cx, cy-R); ctx.lineTo(cx, cy+R);
@@ -317,6 +350,7 @@ function drawJoy(){
   ctx.lineWidth = 2;
   ctx.stroke();
 
+  // knob
   const kx = cx + knob.x * R;
   const ky = cy + knob.y * R;
 
@@ -336,8 +370,8 @@ function viewportFromKnob(){
   const yawRange = Number(yawRangeEl.value || 90);
   const pitchRange = Number(pitchRangeEl.value || 45);
 
-  const yawDeg = knob.x * yawRange;
-  const pitchDeg = -knob.y * pitchRange;
+  const yawDeg = knobVp.x * yawRange;
+  const pitchDeg = -knobVp.y * pitchRange;
 
   const hfovDeg = Number(hfovEl.value || 120);
   const vfovDeg = Number(vfovEl.value || 120);
@@ -347,8 +381,8 @@ function viewportFromKnob(){
 
 function sendViewportThrottled(){
   const now = performance.now();
-  if (now - lastSent < 33) return; // ~30Hz
-  lastSent = now;
+  if (now - lastVpSent < 33) return; // ~30Hz
+  lastVpSent = now;
 
   if (!selectedRobotId) return;
 
@@ -362,8 +396,8 @@ vfovDeg: ${vp.vfovDeg.toFixed(0)}`;
   send({ type:"viewport", robotId: selectedRobotId, ...vp });
 }
 
-function updateKnobFromClient(clientX, clientY){
-  const rect = joy.getBoundingClientRect();
+function updateKnobFromClient(canvas, knob, clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
   const x = clientX - rect.left;
   const y = clientY - rect.top;
 
@@ -378,40 +412,206 @@ function updateKnobFromClient(clientX, clientY){
 
   knob.x = nx;
   knob.y = ny;
+}
 
-  drawJoy();
+function onDownVp(e){
+  draggingVp = true;
+  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
+  updateKnobFromClient(joyViewport, knobVp, p.clientX, p.clientY);
+  drawJoy(ctxVp, joyViewport, knobVp);
   sendViewportThrottled();
 }
-
-function onDown(e){
-  dragging = true;
+function onMoveVp(e){
+  if (!draggingVp) return;
   const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
-  updateKnobFromClient(p.clientX, p.clientY);
+  updateKnobFromClient(joyViewport, knobVp, p.clientX, p.clientY);
+  drawJoy(ctxVp, joyViewport, knobVp);
+  sendViewportThrottled();
 }
-function onMove(e){
-  if (!dragging) return;
-  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
-  updateKnobFromClient(p.clientX, p.clientY);
-}
-function onUp(){ dragging = false; }
+function onUpVp(){ draggingVp = false; }
 
-joy.addEventListener("mousedown", onDown);
-window.addEventListener("mousemove", onMove);
-window.addEventListener("mouseup", onUp);
+joyViewport.addEventListener("mousedown", onDownVp);
+window.addEventListener("mousemove", onMoveVp);
+window.addEventListener("mouseup", onUpVp);
 
-joy.addEventListener("touchstart", (e)=>{ e.preventDefault(); onDown(e); }, {passive:false});
-joy.addEventListener("touchmove", (e)=>{ e.preventDefault(); onMove(e); }, {passive:false});
-joy.addEventListener("touchend", (e)=>{ e.preventDefault(); onUp(); }, {passive:false});
-joy.addEventListener("touchcancel", (e)=>{ e.preventDefault(); onUp(); }, {passive:false});
+joyViewport.addEventListener("touchstart", (e)=>{ e.preventDefault(); onDownVp(e); }, {passive:false});
+joyViewport.addEventListener("touchmove", (e)=>{ e.preventDefault(); onMoveVp(e); }, {passive:false});
+joyViewport.addEventListener("touchend", (e)=>{ e.preventDefault(); onUpVp(); }, {passive:false});
+joyViewport.addEventListener("touchcancel", (e)=>{ e.preventDefault(); onUpVp(); }, {passive:false});
 
-btnCenter.addEventListener("click", ()=>{
-  knob.x = 0; knob.y = 0;
-  drawJoy();
-  lastSent = 0;
+btnCenterViewport.addEventListener("click", ()=>{
+  knobVp.x = 0; knobVp.y = 0;
+  drawJoy(ctxVp, joyViewport, knobVp);
+  lastVpSent = 0;
   sendViewportThrottled();
 });
 
-drawJoy();
+// ======================
+// MOVEMENT JOYSTICK (locomotion)
+// ======================
+let draggingMv = false;
+let knobMv = { x: 0, y: 0 }; // normalized [-1,1]
+let lastJoySent = 0;
+
+function sendJoyThrottled(force=false){
+  const now = performance.now();
+  const minDt = 1000 / 60; // ~60 Hz
+  if (!force && (now - lastJoySent < minDt)) return;
+  lastJoySent = now;
+
+  if (!selectedRobotId) return;
+
+  send({
+    type:"joy",
+    robotId: selectedRobotId,
+    lx: joyState.lx,
+    ly: joyState.ly,
+    rx: joyState.rx,
+    ry: joyState.ry,
+    lt: joyState.lt,
+    rt: joyState.rt,
+    ts: now / 1000
+  });
+}
+
+function onDownMv(e){
+  draggingMv = true;
+  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
+  updateKnobFromClient(joyMove, knobMv, p.clientX, p.clientY);
+  drawJoy(ctxMv, joyMove, knobMv);
+
+  joyState.lx = clamp(knobMv.x, -1, 1);
+  joyState.ly = clamp(knobMv.y, -1, 1);
+
+  setMoveStateText();
+  sendJoyThrottled(true);
+}
+function onMoveMv(e){
+  if (!draggingMv) return;
+  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
+  updateKnobFromClient(joyMove, knobMv, p.clientX, p.clientY);
+  drawJoy(ctxMv, joyMove, knobMv);
+
+  joyState.lx = clamp(knobMv.x, -1, 1);
+  joyState.ly = clamp(knobMv.y, -1, 1);
+
+  setMoveStateText();
+  sendJoyThrottled(false);
+}
+function onUpMv(){
+  if (!draggingMv) return;
+  draggingMv = false;
+
+  knobMv.x = 0; knobMv.y = 0;
+  drawJoy(ctxMv, joyMove, knobMv);
+
+  joyState.lx = 0;
+  joyState.ly = 0;
+
+  setMoveStateText();
+  sendJoyThrottled(true);
+}
+
+joyMove.addEventListener("mousedown", onDownMv);
+window.addEventListener("mousemove", onMoveMv);
+window.addEventListener("mouseup", onUpMv);
+
+joyMove.addEventListener("touchstart", (e)=>{ e.preventDefault(); onDownMv(e); }, {passive:false});
+joyMove.addEventListener("touchmove", (e)=>{ e.preventDefault(); onMoveMv(e); }, {passive:false});
+joyMove.addEventListener("touchend", (e)=>{ e.preventDefault(); onUpMv(); }, {passive:false});
+joyMove.addEventListener("touchcancel", (e)=>{ e.preventDefault(); onUpMv(); }, {passive:false});
+
+btnCenterMove.addEventListener("click", ()=>{
+  knobMv.x = 0; knobMv.y = 0;
+  drawJoy(ctxMv, joyMove, knobMv);
+
+  joyState.lx = 0;
+  joyState.ly = 0;
+  setMoveStateText();
+
+  lastJoySent = 0;
+  sendJoyThrottled(true);
+});
+
+// ======================
+// Trigger sliders (lt/rt)
+// ======================
+function updateTriggerUI(){
+  joyState.lt = clamp(Number(ltSlider.value || 0), 0, 1);
+  joyState.rt = clamp(Number(rtSlider.value || 0), 0, 1);
+  ltVal.textContent = joyState.lt.toFixed(2);
+  rtVal.textContent = joyState.rt.toFixed(2);
+  setMoveStateText();
+
+  // If user is adjusting triggers, send joy at a modest rate
+  sendJoyThrottled(true);
+}
+
+ltSlider.addEventListener("input", updateTriggerUI);
+rtSlider.addEventListener("input", updateTriggerUI);
+
+// ======================
+// Button testing (press/release)
+// - Click toggles state and sends btn event.
+// - Also supports press-and-hold with pointer events.
+// ======================
+function sendBtn(id, v){
+  if (!selectedRobotId) return;
+  send({
+    type:"btn",
+    robotId: selectedRobotId,
+    id,
+    v,
+    ts: performance.now() / 1000
+  });
+}
+
+function setBtnVisual(btnEl, isOn){
+  btnEl.classList.toggle("on", isOn);
+}
+
+for (const el of btnPads){
+  const id = el.getAttribute("data-btn");
+  btnState.set(id, 0);
+  setBtnVisual(el, false);
+
+  // Click toggle (pleasant and simple)
+  el.addEventListener("click", ()=>{
+    const next = btnState.get(id) ? 0 : 1;
+    btnState.set(id, next);
+    setBtnVisual(el, next === 1);
+    sendBtn(id, next);
+  });
+
+  // Optional: press-and-hold behavior (mouse/touch)
+  // If you want it, uncomment this and remove the click handler above.
+  /*
+  el.addEventListener("pointerdown", (e)=>{
+    e.preventDefault();
+    btnState.set(id, 1);
+    setBtnVisual(el, true);
+    sendBtn(id, 1);
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener("pointerup", ()=>{
+    btnState.set(id, 0);
+    setBtnVisual(el, false);
+    sendBtn(id, 0);
+  });
+  el.addEventListener("pointercancel", ()=>{
+    btnState.set(id, 0);
+    setBtnVisual(el, false);
+    sendBtn(id, 0);
+  });
+  */
+}
+
+// ======================
+// Init UI
+// ======================
+drawJoy(ctxVp, joyViewport, knobVp);
+drawJoy(ctxMv, joyMove, knobMv);
+setMoveStateText();
 setWsState("disconnected");
 setPcState("idle");
 log("Ready. Connect WS, select robot, Start WebRTC.");

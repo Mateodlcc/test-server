@@ -4,107 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Unity Simulator (Headset)</title>
-  <style>
-    :root{
-      --bg:#0b1220; --panel:#0b1220; --border:#334155; --text:#e5e7eb;
-      --muted:#94a3b8; --primary:#4f46e5; --ghost:#1f2937;
-      --shadow: 0 10px 30px rgba(0,0,0,.35);
-    }
-    *{box-sizing:border-box}
-    body{margin:0; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--text);}
-    .app{min-height:100vh; display:flex; flex-direction:column;}
-    .topbar{
-      display:flex; gap:12px; align-items:center; justify-content:space-between;
-      padding:14px 16px; border-bottom:1px solid var(--border);
-      position:sticky; top:0; background:rgba(11,18,32,.92); backdrop-filter: blur(10px);
-      z-index:10;
-    }
-    .title h2{margin:0; font-size:18px;}
-    .subtitle{font-size:12px; color:var(--muted);}
-    .conn{display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
-    input,select,button{
-      padding:10px 12px; border-radius:12px; border:1px solid var(--border);
-      background:var(--panel); color:var(--text); outline:none;
-    }
-    input::placeholder{color:#64748b}
-    button{cursor:pointer; user-select:none;}
-    button.primary{background:var(--primary); border:none;}
-    button.ghost{background:var(--ghost); border:1px solid var(--border);}
-    button:active{transform:translateY(1px)}
-    .ws{min-width:320px}
-
-    .main{
-      display:grid; grid-template-columns: 1.7fr 1fr; gap:14px;
-      padding:14px 16px;
-      align-items:start;
-    }
-    .card{
-      border:1px solid var(--border);
-      border-radius:16px;
-      padding:12px;
-      background:rgba(255,255,255,0.02);
-      box-shadow: var(--shadow);
-    }
-    .card-title{
-      display:flex; align-items:center; justify-content:space-between;
-      font-size:12px; color:var(--muted); margin-bottom:10px;
-    }
-    .pill{
-      font-size:12px; padding:4px 8px; border-radius:999px;
-      border:1px solid var(--border); color:var(--muted);
-      background:rgba(0,0,0,.15);
-    }
-    .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
-    .grow{flex:1}
-
-    video{
-      width:100%;
-      background:black;
-      border-radius:14px;
-      max-height: 58vh;
-    }
-    pre{
-      margin:0;
-      white-space:pre-wrap;
-      background:rgba(0,0,0,.25);
-      border:1px solid var(--border);
-      border-radius:14px;
-      padding:10px;
-      max-height: 28vh;
-      overflow:auto;
-      font-size:12px;
-      line-height:1.35;
-    }
-
-    .grid2{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap:10px;
-    }
-    .label{
-      font-size:12px; color:var(--muted);
-      margin-bottom:6px;
-    }
-    .small{
-      font-size:12px; color:var(--muted);
-    }
-
-    canvas#joy{
-      width:220px; height:220px;
-      touch-action:none;
-      background:rgba(0,0,0,.18);
-      border:1px solid var(--border);
-      border-radius:16px;
-      display:block;
-    }
-
-    @media (max-width: 980px){
-      .main{grid-template-columns:1fr;}
-      .ws{min-width:220px}
-      video{max-height:45vh}
-      canvas#joy{width:260px; height:260px;}
-    }
-  </style>
+  <link rel="stylesheet" href="simulador.css">
 </head>
 
 <body>
@@ -130,7 +30,7 @@
             <span id="pcState" class="pill">PC: idle</span>
           </div>
           <video id="vid" autoplay playsinline muted></video>
-          <div class="small" style="margin-top:8px; opacity:.85;">
+          <div class="small tip">
             Tip: selecciona un robot, luego <b>Start WebRTC</b>. Si cambias de robot, el simulador reinicia WebRTC automáticamente.
           </div>
         </div>
@@ -167,50 +67,116 @@
 
           <div class="row" style="margin-top:10px;">
             <button id="btnClearLog" class="ghost grow">Clear logs</button>
-            <button id="btnCenter" class="ghost">Center</button>
+            <button id="btnCenterViewport" class="ghost">Center View</button>
+            <button id="btnCenterMove" class="ghost">Center Move</button>
           </div>
         </div>
 
         <div class="card" style="margin-top:14px;">
           <div class="card-title">
-            <span>Viewport joystick</span>
-            <span class="pill">~30 Hz</span>
+            <span>Controls</span>
+            <span class="pill">viewport + locomotion</span>
           </div>
 
-          <div class="row" style="gap:14px;">
-            <canvas id="joy" width="220" height="220"></canvas>
+          <div class="controls-grid">
+            <!-- Viewport joystick -->
+            <div class="panel">
+              <div class="panel-title">
+                <span>Head / Viewport</span>
+                <span class="pill tiny">~30 Hz</span>
+              </div>
 
-            <div class="grow">
-              <div class="label">Viewport state</div>
-              <pre id="vpState" style="max-height:160px;">yawDeg: 0
+              <div class="row" style="gap:14px;">
+                <canvas id="joyViewport" width="220" height="220"></canvas>
+
+                <div class="grow">
+                  <div class="label">Viewport state</div>
+                  <pre id="vpState" class="mini-pre">yawDeg: 0
 pitchDeg: 0
 hfovDeg: 120
 vfovDeg: 120</pre>
-            </div>
-          </div>
+                </div>
+              </div>
 
-          <div class="grid2" style="margin-top:10px;">
-            <div>
-              <div class="label">Yaw range (°)</div>
-              <input id="yawRange" type="number" value="90">
-            </div>
-            <div>
-              <div class="label">Pitch range (°)</div>
-              <input id="pitchRange" type="number" value="45">
-            </div>
-            <div>
-              <div class="label">HFOV (°)</div>
-              <input id="hfov" type="number" value="120">
-            </div>
-            <div>
-              <div class="label">VFOV (°)</div>
-              <input id="vfov" type="number" value="120">
-            </div>
-          </div>
+              <div class="grid2" style="margin-top:10px;">
+                <div>
+                  <div class="label">Yaw range (°)</div>
+                  <input id="yawRange" type="number" value="90">
+                </div>
+                <div>
+                  <div class="label">Pitch range (°)</div>
+                  <input id="pitchRange" type="number" value="45">
+                </div>
+                <div>
+                  <div class="label">HFOV (°)</div>
+                  <input id="hfov" type="number" value="120">
+                </div>
+                <div>
+                  <div class="label">VFOV (°)</div>
+                  <input id="vfov" type="number" value="120">
+                </div>
+              </div>
 
-          <div class="small" style="margin-top:10px; opacity:.85;">
-            En modo <b>cropped</b>, este joystick debe mover la vista en el robot. Si no se ve video al cambiar de robot,
-            revisa que el simulador esté reiniciando WebRTC (ver logs).
+              <div class="small note">
+                Este joystick controla el <b>viewport</b> (alineación de crop360). No afecta locomoción.
+              </div>
+            </div>
+
+            <!-- Movement joystick + controller testing -->
+            <div class="panel">
+              <div class="panel-title">
+                <span>Movement / Locomotion</span>
+                <span class="pill tiny">~60 Hz while dragging</span>
+              </div>
+
+              <div class="row" style="gap:14px;">
+                <canvas id="joyMove" width="220" height="220"></canvas>
+
+                <div class="grow">
+                  <div class="label">Locomotion state</div>
+                  <pre id="moveState" class="mini-pre">lx: 0.000
+ly: 0.000
+rx: 0.000
+ry: 0.000
+lt: 0.000
+rt: 0.000</pre>
+
+                  <div class="label" style="margin-top:10px;">Triggers</div>
+                  <div class="slider-row">
+                    <span class="tag">LT</span>
+                    <input id="ltSlider" type="range" min="0" max="1" step="0.01" value="0">
+                    <span id="ltVal" class="mono">0.00</span>
+                  </div>
+                  <div class="slider-row">
+                    <span class="tag">RT</span>
+                    <input id="rtSlider" type="range" min="0" max="1" step="0.01" value="0">
+                    <span id="rtVal" class="mono">0.00</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="label" style="margin-top:10px;">Buttons (press / release)</div>
+              <div class="btn-grid">
+                <button class="btnpad" data-btn="X"><span class="k">X</span><span class="d">Left</span></button>
+                <button class="btnpad" data-btn="Y"><span class="k">Y</span><span class="d">Up</span></button>
+                <button class="btnpad" data-btn="A"><span class="k">A</span><span class="d">Down</span></button>
+                <button class="btnpad" data-btn="B"><span class="k">B</span><span class="d">Right</span></button>
+
+                <button class="btnpad" data-btn="LB"><span class="k">LB</span><span class="d">Shoulder</span></button>
+                <button class="btnpad" data-btn="RB"><span class="k">RB</span><span class="d">Shoulder</span></button>
+                <button class="btnpad" data-btn="LG"><span class="k">LG</span><span class="d">Grip</span></button>
+                <button class="btnpad" data-btn="RG"><span class="k">RG</span><span class="d">Grip</span></button>
+
+                <button class="btnpad" data-btn="LSTICK"><span class="k">L3</span><span class="d">Stick</span></button>
+                <button class="btnpad" data-btn="RSTICK"><span class="k">R3</span><span class="d">Stick</span></button>
+                <button class="btnpad" data-btn="MENU"><span class="k">≡</span><span class="d">Menu</span></button>
+                <button class="btnpad" data-btn="META"><span class="k">◉</span><span class="d">Meta</span></button>
+              </div>
+
+              <div class="small note">
+                Los botones envían eventos <code>btn</code> (1 al presionar / 0 al soltar). Los sliders afectan <code>lt/rt</code> en el mensaje <code>joy</code>.
+              </div>
+            </div>
           </div>
         </div>
       </aside>
