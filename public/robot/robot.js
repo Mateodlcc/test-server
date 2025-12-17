@@ -5,6 +5,7 @@ const stunEl = document.getElementById("stunUrl");
 const modeEl = document.getElementById("mode");
 const hfovEl = document.getElementById("hfov");
 const vfovEl = document.getElementById("vfov");
+const video360Sel = document.getElementById("video360Sel");
 
 const btnConnect = document.getElementById("btnConnect");
 const btnDisconnect = document.getElementById("btnDisconnect");
@@ -345,14 +346,15 @@ async function applyModeAndStartMedia() {
     }
     else {
       video360El = document.createElement("video");
-      video360El.src = "/360.mp4";
+      const videoFile = video360Sel.value === "360_2" ? "/360_2.mp4" : "/360.mp4";
+      video360El.src = videoFile;
       video360El.loop = true;
       video360El.muted = true;
       video360El.playsInline = true;
 
       await new Promise((resolve, reject) => {
         const onLoaded = () => { cleanup(); resolve(); };
-        const onErr = () => { cleanup(); reject(new Error("Failed to load /360.mp4")); };
+        const onErr = () => { cleanup(); reject(new Error(`Failed to load ${videoFile}`)); };
         const cleanup = () => {
           video360El.removeEventListener("loadedmetadata", onLoaded);
           video360El.removeEventListener("error", onErr);
@@ -374,7 +376,11 @@ async function applyModeAndStartMedia() {
         setStatus(mediaStatusEl, "Media: 360 (skybox)", "ok");
       } else {
         // crop360: full equirect output with black fill
-        localStream = startBlackEquirectWithViewport(video360El, 2048, 1024, 30);
+        // Use 4096x2048 for 360.mp4 (1920x1080), or 8192x4096 for 360_2.mp4 (3840x2160)
+        const isHighRes = video360Sel.value === "360_2";
+        const canvasW = isHighRes ? 8192 : 4096;
+        const canvasH = isHighRes ? 4096 : 2048;
+        localStream = startBlackEquirectWithViewport(video360El, canvasW, canvasH, 60);
         preview.srcObject = localStream;
 
         sendUnityRenderMode();
