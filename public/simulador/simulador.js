@@ -3,6 +3,7 @@
 // - UI dashboard
 // - Viewport joystick
 // - Multi-robot fix: reset PeerConnection when switching robots
+// - UPDATED: Split control test (pose/joy/btn) instead of legacy "control"
 // ======================
 
 // Elements
@@ -159,8 +160,6 @@ btnConnect.onclick = ()=>{
     if (t === "selected_robot"){
       selectedRobotId = msg.robotId;
       log(`selectedRobotId=${selectedRobotId}`);
-
-      // IMPORTANT: switching robot => kill old PC to avoid stuck tracks / negotiation
       resetWebRTC("robot switched");
     }
 
@@ -217,11 +216,9 @@ btnStart.onclick = async ()=>{
     return;
   }
 
-  // Start should always begin from clean state
   resetWebRTC("start pressed");
   ensurePcFresh();
 
-  // receive-only video
   try{
     pc.addTransceiver("video", { direction:"recvonly" });
   }catch(e){
@@ -238,16 +235,50 @@ btnStart.onclick = async ()=>{
   }
 };
 
-// --- Test messages ---
+// --- Test messages (UPDATED) ---
 btnSendControl.onclick = ()=>{
+  if (!selectedRobotId){
+    log("Selecciona robot primero");
+    return;
+  }
+
+  // 1) pose (example)
   send({
-    type:"control",
+    type:"pose",
     robotId: selectedRobotId,
-    seq: Date.now(),
-    lx: 0.2, ly: -0.1,
-    rx: 0.0, ry: 0.0,
-    a: true
+    roll: 0,
+    pitch: 0,
+    yaw: 15,
+    ts: performance.now() / 1000
   });
+
+  // 2) joystick (example)
+  send({
+    type:"joy",
+    robotId: selectedRobotId,
+    x: 0.2,
+    y: -0.1,
+    ts: performance.now() / 1000
+  });
+
+  // 3) button edge: A press then release
+  send({
+    type:"btn",
+    robotId: selectedRobotId,
+    id: "A",
+    v: 1,
+    ts: performance.now() / 1000
+  });
+
+  setTimeout(()=>{
+    send({
+      type:"btn",
+      robotId: selectedRobotId,
+      id: "A",
+      v: 0,
+      ts: performance.now() / 1000
+    });
+  }, 150);
 };
 
 btnSendViewport.onclick = ()=>{
