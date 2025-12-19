@@ -132,7 +132,8 @@ pre{
 }
 
 canvas#joyViewport,
-canvas#joyMove{
+canvas#joyMoveLeft,
+canvas#joyMoveRight{
   width:220px;
   height:220px;
   touch-action:none;

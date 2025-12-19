@@ -1,13 +1,3 @@
-// ======================
-// Unity Simulator (Headset) - WS + WebRTC
-// - Two joysticks:
-//   * joyViewport -> sends type:"viewport" (head crop alignment)
-//   * joyMove     -> sends type:"joy" (locomotion lx/ly) continuously while dragging
-// - Controller button testing:
-//   * pretty toggles that send btn press/release
-//   * triggers sliders feed lt/rt into joy messages
-// ======================
-
 // Elements
 const wsUrlEl = document.getElementById("wsUrl");
 const btnConnect = document.getElementById("btnConnect");
@@ -37,8 +27,10 @@ const hfovEl = document.getElementById("hfov");
 const vfovEl = document.getElementById("vfov");
 
 // Movement UI
-const joyMove = document.getElementById("joyMove");
-const ctxMv = joyMove.getContext("2d");
+const joyMoveLeft = document.getElementById("joyMoveLeft");
+const ctxMvLeft = joyMoveLeft.getContext("2d");
+const joyMoveRight = document.getElementById("joyMoveRight");
+const ctxMvRight = joyMoveRight.getContext("2d");
 const moveStateEl = document.getElementById("moveState");
 const ltSlider = document.getElementById("ltSlider");
 const rtSlider = document.getElementById("rtSlider");
@@ -162,6 +154,16 @@ btnConnect.onclick = ()=>{
     try { msg = JSON.parse(ev.data); } catch { return; }
 
     const t = msg.type;
+
+    // --- Handle the latencyStats message ---
+    if (t === 'latencyStats') {
+      const rtt = msg.rtt || 'n/a';
+      const rxLatency = msg.rxLatency || 'n/a';
+
+      // Update the UI with the new stats
+      document.getElementById("rttDisplay").textContent = `RTT: ${rtt} ms`;
+      document.getElementById("rxLatencyDisplay").textContent = `RX Latency: ${rxLatency} ms`;
+    }
 
     if (t === "robots"){
       robotList.innerHTML = "";
@@ -474,36 +476,44 @@ function sendJoyThrottled(force=false){
   });
 }
 
-function onDownMv(e){
-  draggingMv = true;
-  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
-  updateKnobFromClient(joyMove, knobMv, p.clientX, p.clientY);
-  drawJoy(ctxMv, joyMove, knobMv);
+// Two independent movement joysticks: left -> (lx, ly), right -> (rx, ry)
+let draggingLeft = false;
+let draggingRight = false;
 
-  joyState.lx = clamp(knobMv.x, -1, 1);
-  joyState.ly = clamp(knobMv.y, -1, 1);
+let knobLeft = { x: 0, y: 0 };
+let knobRight = { x: 0, y: 0 };
+
+// LEFT stick handlers (updates lx, ly)
+function onDownLeft(e){
+  draggingLeft = true;
+  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
+  updateKnobFromClient(joyMoveLeft, knobLeft, p.clientX, p.clientY);
+  drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
+
+  joyState.lx = clamp(knobLeft.x, -1, 1);
+  joyState.ly = -clamp(knobLeft.y, 1, 1);
 
   setMoveStateText();
   sendJoyThrottled(true);
 }
-function onMoveMv(e){
-  if (!draggingMv) return;
+function onMoveLeft(e){
+  if (!draggingLeft) return;
   const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
-  updateKnobFromClient(joyMove, knobMv, p.clientX, p.clientY);
-  drawJoy(ctxMv, joyMove, knobMv);
+  updateKnobFromClient(joyMoveLeft, knobLeft, p.clientX, p.clientY);
+  drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
 
-  joyState.lx = clamp(knobMv.x, -1, 1);
-  joyState.ly = clamp(knobMv.y, -1, 1);
+  joyState.lx = clamp(knobLeft.x, -1, 1);
+  joyState.ly = -clamp(knobLeft.y, -1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
 }
-function onUpMv(){
-  if (!draggingMv) return;
-  draggingMv = false;
+function onUpLeft(){
+  if (!draggingLeft) return;
+  draggingLeft = false;
 
-  knobMv.x = 0; knobMv.y = 0;
-  drawJoy(ctxMv, joyMove, knobMv);
+  knobLeft.x = 0; knobLeft.y = 0;
+  drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
 
   joyState.lx = 0;
   joyState.ly = 0;
@@ -512,23 +522,76 @@ function onUpMv(){
   sendJoyThrottled(true);
 }
 
-joyMove.addEventListener("mousedown", onDownMv);
-window.addEventListener("mousemove", onMoveMv);
-window.addEventListener("mouseup", onUpMv);
+// RIGHT stick handlers (updates rx, ry)
+function onDownRight(e){
+  draggingRight = true;
+  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
+  updateKnobFromClient(joyMoveRight, knobRight, p.clientX, p.clientY);
+  drawJoy(ctxMvRight, joyMoveRight, knobRight);
 
-joyMove.addEventListener("touchstart", (e)=>{ e.preventDefault(); onDownMv(e); }, {passive:false});
-joyMove.addEventListener("touchmove", (e)=>{ e.preventDefault(); onMoveMv(e); }, {passive:false});
-joyMove.addEventListener("touchend", (e)=>{ e.preventDefault(); onUpMv(); }, {passive:false});
-joyMove.addEventListener("touchcancel", (e)=>{ e.preventDefault(); onUpMv(); }, {passive:false});
+  joyState.rx = clamp(knobRight.x, -1, 1);
+  joyState.ry = -clamp(knobRight.y, -1, 1);
 
-btnCenterMove.addEventListener("click", ()=>{
-  knobMv.x = 0; knobMv.y = 0;
-  drawJoy(ctxMv, joyMove, knobMv);
-
-  joyState.lx = 0;
-  joyState.ly = 0;
   setMoveStateText();
+  sendJoyThrottled(true);
+}
+function onMoveRight(e){
+  if (!draggingRight) return;
+  const p = (e.touches && e.touches[0]) ? e.touches[0] : e;
+  updateKnobFromClient(joyMoveRight, knobRight, p.clientX, p.clientY);
+  drawJoy(ctxMvRight, joyMoveRight, knobRight);
 
+  joyState.rx = clamp(knobRight.x, -1, 1);
+  joyState.ry = -clamp(knobRight.y, -1, 1);
+
+  setMoveStateText();
+  sendJoyThrottled(false);
+}
+function onUpRight(){
+  if (!draggingRight) return;
+  draggingRight = false;
+
+  knobRight.x = 0; knobRight.y = 0;
+  drawJoy(ctxMvRight, joyMoveRight, knobRight);
+
+  joyState.rx = 0;
+  joyState.ry = 0;
+
+  setMoveStateText();
+  sendJoyThrottled(true);
+}
+
+// Mouse events
+joyMoveLeft.addEventListener("mousedown", onDownLeft);
+window.addEventListener("mousemove", onMoveLeft);
+window.addEventListener("mouseup", onUpLeft);
+
+joyMoveRight.addEventListener("mousedown", onDownRight);
+window.addEventListener("mousemove", onMoveRight);
+window.addEventListener("mouseup", onUpRight);
+
+// Touch events
+joyMoveLeft.addEventListener("touchstart", (e)=>{ e.preventDefault(); onDownLeft(e); }, {passive:false});
+joyMoveLeft.addEventListener("touchmove", (e)=>{ e.preventDefault(); onMoveLeft(e); }, {passive:false});
+joyMoveLeft.addEventListener("touchend", (e)=>{ e.preventDefault(); onUpLeft(); }, {passive:false});
+joyMoveLeft.addEventListener("touchcancel", (e)=>{ e.preventDefault(); onUpLeft(); }, {passive:false});
+
+joyMoveRight.addEventListener("touchstart", (e)=>{ e.preventDefault(); onDownRight(e); }, {passive:false});
+joyMoveRight.addEventListener("touchmove", (e)=>{ e.preventDefault(); onMoveRight(e); }, {passive:false});
+joyMoveRight.addEventListener("touchend", (e)=>{ e.preventDefault(); onUpRight(); }, {passive:false});
+joyMoveRight.addEventListener("touchcancel", (e)=>{ e.preventDefault(); onUpRight(); }, {passive:false});
+
+// Center both sticks button
+btnCenterMove.addEventListener("click", ()=>{
+  knobLeft.x = 0; knobLeft.y = 0;
+  knobRight.x = 0; knobRight.y = 0;
+  drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
+  drawJoy(ctxMvRight, joyMoveRight, knobRight);
+
+  joyState.lx = 0; joyState.ly = 0;
+  joyState.rx = 0; joyState.ry = 0;
+
+  setMoveStateText();
   lastJoySent = 0;
   sendJoyThrottled(true);
 });
@@ -610,7 +673,8 @@ for (const el of btnPads){
 // Init UI
 // ======================
 drawJoy(ctxVp, joyViewport, knobVp);
-drawJoy(ctxMv, joyMove, knobMv);
+drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
+drawJoy(ctxMvRight, joyMoveRight, knobRight);
 setMoveStateText();
 setWsState("disconnected");
 setPcState("idle");

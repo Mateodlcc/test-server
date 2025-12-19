@@ -71,7 +71,17 @@
             <button id="btnCenterMove" class="ghost">Center Move</button>
           </div>
         </div>
-
+        
+        <div class="card" style="margin-top:14px;">
+          <div class="card-title">
+            <span>Latency Stats</span>
+          </div>
+          <div class="logs">
+            <div id="rttDisplay">RTT: n/a</div>
+            <div id="rxLatencyDisplay">RX Latency: n/a</div>
+          </div>
+        </div>
+        
         <div class="card" style="margin-top:14px;">
           <div class="card-title">
             <span>Controls</span>
@@ -130,7 +140,8 @@ vfovDeg: 120</pre>
               </div>
 
               <div class="row" style="gap:14px;">
-                <canvas id="joyMove" width="220" height="220"></canvas>
+                <canvas id="joyMoveLeft" width="200" height="200"></canvas><!-- Left -->
+                <canvas id="joyMoveRight" width="200" height="200"></canvas><!-- Right -->
 
                 <div class="grow">
                   <div class="label">Locomotion state</div>
