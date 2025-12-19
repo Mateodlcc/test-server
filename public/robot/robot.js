@@ -512,43 +512,6 @@ async function applyModeAndStartMedia() {
   }
 }
 
-// --- Update this section to extract WebRTC stats ---
-async function updateLatencyStats() {
-  if (!pc) return;
-
-  const stats = await pc.getStats();
-
-  let rtt = null;
-  let rxLatency = null;
-
-  stats.forEach(report => {
-    if (report.type === 'candidate-pair' && report.currentRoundTripTime) {
-      // Extract RTT from ICE candidate pair stats
-      rtt = report.currentRoundTripTime * 1000;  // Convert seconds to ms
-    }
-
-    if (report.type === 'inbound-rtp' && report.jitterBufferDelay && report.totalDecodeTime) {
-      // Extract RX latency (jitterBufferDelay + totalDecodeTime)
-      const jitterBufferDelay = report.jitterBufferDelay * 1000;  // Convert to ms
-      const totalDecodeTime = report.totalDecodeTime * 1000;  // Convert to ms
-      rxLatency = jitterBufferDelay + totalDecodeTime;
-    }
-  });
-
-  if (rtt !== null && rxLatency !== null) {
-    // Send these stats back to the frontend (UI) using WebSocket
-    sendWs({
-      type: 'latencyStats',
-      rtt: rtt,
-      rxLatency: rxLatency
-    });
-  }
-}
-
-// --- Call updateLatencyStats() periodically ---
-setInterval(updateLatencyStats, 1000);  // Update stats every second
-
-
 // ---------- Cleanup ----------
 function cleanupAll() {
   pendingOffer = null;

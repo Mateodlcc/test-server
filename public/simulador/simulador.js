@@ -163,16 +163,6 @@ btnConnect.onclick = ()=>{
 
     const t = msg.type;
 
-    // --- Handle the latencyStats message ---
-    if (t === 'latencyStats') {
-      const rtt = msg.rtt || 'n/a';
-      const rxLatency = msg.rxLatency || 'n/a';
-
-      // Update the UI with the new stats
-      document.getElementById("rttDisplay").textContent = `RTT: ${rtt} ms`;
-      document.getElementById("rxLatencyDisplay").textContent = `RX Latency: ${rxLatency} ms`;
-    }
-
     if (t === "robots"){
       robotList.innerHTML = "";
       for (const r of msg.robots || []){
