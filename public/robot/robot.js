@@ -84,6 +84,68 @@ const latest = {
   btn: {} // id -> v
 };
 
+// --- Low latency WebRTC tuning ---
+function preferCodecInSdp(sdp, preferred) {
+  // preferred: "H264" or "VP8"
+  // Very small SDP "munging": reorder payload types in m=video
+  const lines = sdp.split("\n");
+  const mLineIdx = lines.findIndex(l => l.startsWith("m=video"));
+  if (mLineIdx < 0) return sdp;
+
+  // collect pt for preferred codec
+  const rtpmap = lines
+    .filter(l => l.startsWith("a=rtpmap:"))
+    .map(l => {
+      const m = l.match(/^a=rtpmap:(\d+)\s+([^/]+)/);
+      return m ? { pt: m[1], codec: m[2].toUpperCase() } : null;
+    })
+    .filter(Boolean);
+
+  const preferredPts = rtpmap.filter(x => x.codec === preferred.toUpperCase()).map(x => x.pt);
+  if (!preferredPts.length) return sdp;
+
+  const parts = lines[mLineIdx].trim().split(" ");
+  const header = parts.slice(0, 3);
+  const pts = parts.slice(3);
+
+  // Move preferred pts to the front (stable)
+  const newPts = [
+    ...preferredPts.filter(pt => pts.includes(pt)),
+    ...pts.filter(pt => !preferredPts.includes(pt))
+  ];
+
+  lines[mLineIdx] = [...header, ...newPts].join(" ");
+  return lines.join("\n");
+}
+
+async function tuneSenderForLowLatency(pc, maxKbps = 6000, maxFps = 60) {
+  const sender = pc.getSenders().find(s => s.track && s.track.kind === "video");
+  if (!sender) return;
+
+  const p = sender.getParameters();
+  if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+
+  // Hard caps (avoid encoder queueing)
+  p.encodings[0].maxBitrate = maxKbps * 1000;
+  p.encodings[0].maxFramerate = maxFps;
+
+  // If you are sending huge frames, enforce downscale in the encoder:
+  // (1.0 = native, 2.0 = half res, etc.)
+  // You can dynamically change this per mode later.
+  if (p.encodings[0].scaleResolutionDownBy == null) {
+    p.encodings[0].scaleResolutionDownBy = 1.0;
+  }
+
+  // Some browsers respect priority hints
+  p.degradationPreference = "maintain-framerate";
+
+  try { await sender.setParameters(p); } catch (e) {}
+
+  // Request frequent keyframes early (helps “instant start”)
+  try { sender.generateKeyFrame?.(); } catch {}
+}
+
+
 function sendWs(obj) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const s = JSON.stringify(obj);
@@ -96,8 +158,12 @@ function ensurePc() {
   if (pc) return;
 
   pc = new RTCPeerConnection({
-    iceServers: [{ urls: [stunEl.value || "stun:stun.l.google.com:19302"] }]
+    iceServers: [{ urls: [stunEl.value || "stun:stun.l.google.com:19302"] }],
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
+    iceCandidatePoolSize: 4
   });
+
 
   pc.onicecandidate = (ev) => {
     if (!ev.candidate) return;
@@ -128,10 +194,22 @@ async function handleOffer(msg) {
   }
 
   await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+
   const answer = await pc.createAnswer();
+
+  // Prefer H264 for Quest if available, otherwise VP8.
+  // (Quest typically does well with H264 hardware decode.)
+  let sdp = answer.sdp;
+  sdp = preferCodecInSdp(sdp, "H264");
+  answer.sdp = sdp;
+
   await pc.setLocalDescription(answer);
 
+  // IMPORTANT: tune sender immediately after localDescription is set
+  await tuneSenderForLowLatency(pc, 6000, 60);
+
   sendWs({ type: "answer", sdp: pc.localDescription.sdp });
+
   log(sigLog, "Answer sent");
 }
 
@@ -369,8 +447,10 @@ async function applyModeAndStartMedia() {
         setStatus(mediaStatusEl, "Media: 360 (skybox)", "ok");
       } else {
         const isHighRes = video360Sel.value === "360_2";
-        const canvasW = isHighRes ? 8192 : 4096;
-        const canvasH = isHighRes ? 4096 : 2048;
+        // const canvasW = isHighRes ? 8192 : 4096;
+        // const canvasH = isHighRes ? 4096 : 2048;
+        const canvasW = 2048;
+        const canvasH = 1024;
         localStream = startBlackEquirectWithViewport(video360El, canvasW, canvasH);
         preview.srcObject = localStream;
 
@@ -389,6 +469,30 @@ async function applyModeAndStartMedia() {
       await videoSender.replaceTrack(track);
       log(sigLog, "replaceTrack(video)");
     }
+
+    // after addTrack/replaceTrack:
+    await tuneSenderForLowLatency(pc, 6000, 60);
+
+    // If crop360 is enabled, DO NOT send 8192-wide frames.
+    // Force encoder downscale (much lower latency).
+    const sender = pc.getSenders().find(s => s.track && s.track.kind === "video");
+    if (sender) {
+      const p = sender.getParameters();
+      if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+
+      if (modeEl.value === "crop360") {
+        p.encodings[0].scaleResolutionDownBy = 2.0; // try 2.0 or 3.0
+        p.encodings[0].maxBitrate = 4500 * 1000;
+        p.encodings[0].maxFramerate = 60;
+      } else {
+        p.encodings[0].scaleResolutionDownBy = 1.0;
+        p.encodings[0].maxBitrate = 6000 * 1000;
+        p.encodings[0].maxFramerate = 60;
+      }
+      p.degradationPreference = "maintain-framerate";
+      try { await sender.setParameters(p); } catch {}
+    }
+
 
     if (pendingOffer) {
       const offer = pendingOffer;
