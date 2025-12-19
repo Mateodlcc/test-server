@@ -125,6 +125,55 @@ function ensurePcFresh(){
   log("PeerConnection creado");
 }
 
+function updateLatencyStats() {
+  if (pc && pc.getStats) {
+    pc.getStats().then(stats => {
+      let rtt = null;
+      let rxLatency = null;
+      let jitter = null;
+      let jitterBufferDelay = null;
+
+      stats.forEach(report => {
+        if (report.type === 'inbound-rtp') {
+          // Extracting the Jitter and JitterBufferDelay for RX Latency
+          if (report.jitter) {
+            jitter = report.jitter * 1000; // Convert to milliseconds
+          }
+          if (report.jitterBufferDelay) {
+            jitterBufferDelay = report.jitterBufferDelay; // JitterBufferDelay can be used as RX Latency
+          }
+          if (report.jitterBufferDelay) {
+            jitterBufferEmittedCount = report.jitterBufferEmittedCount; // JitterBufferDelay can be used as RX Latency
+          }
+          rxLatency = jitterBufferDelay / (jitterBufferEmittedCount || 1); // Average RX Latency
+        }
+        
+        if (report.type === 'remote-outbound-rtp') {
+          // Extracting the RTT (Round Trip Time)
+          console.log(report);
+          if (report.roundTripTimeMeasurements >= 0) {
+            console.log("AAAAAA");
+            rtt = report.roundTripTimeMeasurements ;  // Round trip time from outbound report
+          }
+        }
+      });
+
+      // Update the UI with RTT and RX Latency
+      document.getElementById("rttDisplay").textContent = `RTT: ${rtt ? rtt.toFixed(2) + ' ms' : 'n/a'}`;
+      document.getElementById("jitterDisplay").textContent = `Jitter: ${jitter ? jitter.toFixed(2) + ' ms' : 'n/a'}`;
+      document.getElementById("rxLatencyDisplay").textContent = `RX Latency: ${rxLatency ? rxLatency.toFixed(2) + ' ms' : 'n/a'}`;
+    }).catch(error => {
+      console.error("Error fetching stats: ", error);
+    });
+  }
+}
+
+// Call updateLatencyStats periodically
+setInterval(updateLatencyStats, 1000); // Update every second
+
+
+
+
 // --- WS connection ---
 btnConnect.onclick = ()=>{
   const url = wsUrlEl.value.trim();
@@ -154,16 +203,6 @@ btnConnect.onclick = ()=>{
     try { msg = JSON.parse(ev.data); } catch { return; }
 
     const t = msg.type;
-
-    // --- Handle the latencyStats message ---
-    if (t === 'latencyStats') {
-      const rtt = msg.rtt || 'n/a';
-      const rxLatency = msg.rxLatency || 'n/a';
-
-      // Update the UI with the new stats
-      document.getElementById("rttDisplay").textContent = `RTT: ${rtt} ms`;
-      document.getElementById("rxLatencyDisplay").textContent = `RX Latency: ${rxLatency} ms`;
-    }
 
     if (t === "robots"){
       robotList.innerHTML = "";
