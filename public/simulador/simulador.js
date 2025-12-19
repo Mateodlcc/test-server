@@ -150,9 +150,9 @@ function updateLatencyStats() {
         
         if (report.type === 'remote-outbound-rtp') {
           // Extracting the RTT (Round Trip Time)
-          console.log(report);
+          // console.log(report);
           if (report.roundTripTimeMeasurements >= 0) {
-            console.log("AAAAAA");
+            // console.log("AAAAAA");
             rtt = report.roundTripTimeMeasurements ;  // Round trip time from outbound report
           }
         }
