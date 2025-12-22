@@ -15,7 +15,36 @@ const btnStopAll = document.getElementById("btnStopAll");
 const wsStatusEl = document.getElementById("wsStatus");
 const pcStatusEl = document.getElementById("pcStatus");
 const mediaStatusEl = document.getElementById("mediaStatus");
+async function measureAndDisplayFPS() {
+  if (!localStream) {
+    fpsEl.textContent = "FPS: --";
+    return;
+  }
+
+  const track = localStream.getVideoTracks()[0];
+  if (!track) {
+    fpsEl.textContent = "FPS: --";
+    return;
+  }
+
+  try {
+    const stats = await pc.getStats(track);
+    let frameRate = 0;
+    stats.forEach(report => {
+      // console.log(report);
+      if (report.type === "outbound-rtp" && report.mediaType === "video") {
+        frameRate = report.framesPerSecond || "n/a";
+      }
+    });
+    fpsEl.textContent = `FPS: ${frameRate.toFixed(1)}`;
+  } catch (e) {
+    fpsEl.textContent = "FPS: error";
+  }
+}
+
+setInterval(measureAndDisplayFPS, 1000);
 const selStatusEl = document.getElementById("selStatus");
+const fpsEl = document.getElementById("FPS");
 
 const rawLog = document.getElementById("rawLog");
 const controlsLog = document.getElementById("controlsLog");
@@ -403,9 +432,13 @@ async function applyModeAndStartMedia() {
     const m = modeEl.value;
 
     if (m === "webcam2d") {
-      var frameRate = parseInt(document.getElementById("webcamFps").value) || 60;
+      const frameRate = parseInt(document.getElementById("webcamFps").value) || 60;
       webcamStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: frameRate } },
+        video: { 
+          frameRate: { ideal: frameRate, min: 30 },
+          width: { ideal: 1280 }, 
+          height: { ideal: 720 }
+        },
         audio: false
       });
       if (myOp !== mediaOpId) return;
@@ -528,6 +561,7 @@ function cleanupAll() {
   setStatus(wsStatusEl, "WS: disconnected", "idle");
 
   selStatusEl.textContent = "";
+  fpsEl.textContent = "";
   btnStartMedia.disabled = true;
   btnDisconnect.disabled = true;
   btnStopAll.disabled = true;
