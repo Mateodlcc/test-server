@@ -403,8 +403,9 @@ async function applyModeAndStartMedia() {
     const m = modeEl.value;
 
     if (m === "webcam2d") {
+      var frameRate = parseInt(document.getElementById("webcamFps").value) || 60;
       webcamStream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 1280, height: 720, frameRate: 30 },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: frameRate } },
         audio: false
       });
       if (myOp !== mediaOpId) return;
