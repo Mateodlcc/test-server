@@ -51,8 +51,22 @@ function guessWsUrl(){
   const {protocol, host} = window.location;
   if (protocol === "https:") return `wss://${host}`;
   if (protocol === "http:") return `ws://${host}`;
-  return "ws://localhost:3000";
+  return "wss://localhost:3000";
 }
+
+function normalizeWsUrl(input){
+  if (!input) return guessWsUrl();
+  try{
+    const u = new URL(input);
+    if (window.location.protocol === "https:" && u.protocol === "ws:") {
+      u.protocol = "wss:";
+    }
+    return u.toString();
+  }catch{
+    return input;
+  }
+}
+
 wsUrlEl.value = guessWsUrl();
 
 // State
@@ -179,11 +193,13 @@ btnConnect.onclick = ()=>{
   const url = wsUrlEl.value.trim();
   if (!url) return;
 
-  ws = new WebSocket(url);
+  const fixedUrl = normalizeWsUrl(url);
+  wsUrlEl.value = fixedUrl;
+  ws = new WebSocket(fixedUrl);
 
   ws.onopen = ()=>{
     setWsState("connected");
-    log(`WS conectado: ${url}`);
+    log(`WS conectado: ${fixedUrl}`);
     send({ type:"hello", role:"headset", clientId });
   };
 

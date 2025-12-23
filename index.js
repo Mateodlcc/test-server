@@ -1,15 +1,48 @@
 const express = require("express");
-const http = require("http");
+const fs = require("node:fs");
+const path = require("node:path");
+const https = require("node:https");
 const WebSocket = require("ws");
 
 const app = express();
-const server = http.createServer(app);
+
+// --- TLS config (expects ./certs/cert.pem and ./certs/key.pem) ---
+const CERT_PATH = process.env.TLS_CERT_PATH || path.join(__dirname, "certs", "cert.pem");
+const KEY_PATH  = process.env.TLS_KEY_PATH  || path.join(__dirname, "certs", "key.pem");
+
+function readTlsOptions() {
+  try {
+    return {
+      cert: fs.readFileSync(CERT_PATH),
+      key: fs.readFileSync(KEY_PATH),
+    };
+  } catch (e) {
+    console.error("❌ Failed to read TLS certificate files.");
+    console.error("   Expected:");
+    console.error("   -", CERT_PATH);
+    console.error("   -", KEY_PATH);
+    console.error("   Error:", e?.message || e);
+    process.exit(1);
+  }
+}
+
+const tlsOptions = readTlsOptions();
+
+// HTTPS server (this replaces http.createServer)
+const server = https.createServer(tlsOptions, app);
+
+// WebSocket server over HTTPS => clients must use wss://
 const wss = new WebSocket.Server({ server });
 
 app.use(express.static("public"));
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log("Server listening on port " + PORT));
+
+// Bind to all interfaces so LAN devices can reach it (via portproxy or mirrored mode)
+server.listen(PORT, "0.0.0.0", () =>
+  console.log(`HTTPS server listening on https://localhost:${PORT}`)
+);
+
 app.get("/", (req, res) => res.send("Signal/Control Server Running!"));
 
 /**
