@@ -1,47 +1,57 @@
 const express = require("express");
 const fs = require("node:fs");
 const path = require("node:path");
+const http = require("node:http");
 const https = require("node:https");
 const WebSocket = require("ws");
 
 const app = express();
 
-// --- TLS config (expects ./certs/cert.pem and ./certs/key.pem) ---
-const CERT_PATH = process.env.TLS_CERT_PATH || path.join(__dirname, "certs", "cert.pem");
-const KEY_PATH  = process.env.TLS_KEY_PATH  || path.join(__dirname, "certs", "key.pem");
+// If you deploy behind a platform proxy (Railway/Render/Fly/Nginx/Cloudflare),
+// the platform terminates HTTPS and forwards plain HTTP to your app.
+// So: default to HTTP unless you explicitly enable HTTPS via USE_HTTPS.
+app.set("trust proxy", true);
 
-function readTlsOptions() {
+app.use(express.static("public"));
+
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || "0.0.0.0";
+
+// Set USE_HTTPS=1 locally when you want https:// + wss:// (mkcert).
+const USE_HTTPS =
+  String(process.env.USE_HTTPS || "").toLowerCase() === "1" ||
+  String(process.env.USE_HTTPS || "").toLowerCase() === "true";
+
+const CERT_PATH =
+  process.env.TLS_CERT_PATH || path.join(__dirname, "certs", "cert.pem");
+const KEY_PATH =
+  process.env.TLS_KEY_PATH || path.join(__dirname, "certs", "key.pem");
+
+function loadTlsOptionsOrExit() {
   try {
     return {
       cert: fs.readFileSync(CERT_PATH),
       key: fs.readFileSync(KEY_PATH),
     };
   } catch (e) {
-    console.error("❌ Failed to read TLS certificate files.");
-    console.error("   Expected:");
-    console.error("   -", CERT_PATH);
-    console.error("   -", KEY_PATH);
+    console.error("❌ USE_HTTPS is enabled but TLS files could not be read.");
+    console.error("   CERT:", CERT_PATH);
+    console.error("   KEY :", KEY_PATH);
     console.error("   Error:", e?.message || e);
     process.exit(1);
   }
 }
 
-const tlsOptions = readTlsOptions();
+const server = USE_HTTPS
+  ? https.createServer(loadTlsOptionsOrExit(), app)
+  : http.createServer(app);
 
-// HTTPS server (this replaces http.createServer)
-const server = https.createServer(tlsOptions, app);
-
-// WebSocket server over HTTPS => clients must use wss://
 const wss = new WebSocket.Server({ server });
 
-app.use(express.static("public"));
-
-const PORT = process.env.PORT || 3000;
-
-// Bind to all interfaces so LAN devices can reach it (via portproxy or mirrored mode)
-server.listen(PORT, "0.0.0.0", () =>
-  console.log(`HTTPS server listening on https://localhost:${PORT}`)
-);
+server.listen(PORT, HOST, () => {
+  const proto = USE_HTTPS ? "https" : "http";
+  console.log(`Server listening on ${proto}://${HOST}:${PORT}`);
+});
 
 app.get("/", (req, res) => res.send("Signal/Control Server Running!"));
 
