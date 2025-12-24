@@ -531,6 +531,33 @@ function sendJoyThrottled(force=false){
   });
 }
 
+// ======================
+// CONTINUOUS JOY SEND (while sticks not centered)
+// ======================
+const JOY_CENTER_EPS = 0.02;   // deadzone para considerar "origen"
+const JOY_HOLD_SEND_HZ = 60;   // frecuencia de reenvío mientras está sostenido
+
+function sticksNotCentered(){
+  return (
+    Math.abs(joyState.lx) > JOY_CENTER_EPS ||
+    Math.abs(joyState.ly) > JOY_CENTER_EPS ||
+    Math.abs(joyState.rx) > JOY_CENTER_EPS ||
+    Math.abs(joyState.ry) > JOY_CENTER_EPS
+  );
+}
+
+setInterval(() => {
+  // Solo si hay conexión y robot seleccionado
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!selectedRobotId) return;
+
+  // Re-envía constantemente mientras NO esté centrado
+  if (sticksNotCentered()) {
+    sendJoyThrottled(false); // respeta el throttle (~60Hz) y evita duplicar con eventos
+  }
+}, 1000 / JOY_HOLD_SEND_HZ);
+
+
 // Two independent movement joysticks: left -> (lx, ly), right -> (rx, ry)
 let draggingLeft = false;
 let draggingRight = false;
@@ -585,7 +612,7 @@ function onDownRight(e){
   drawJoy(ctxMvRight, joyMoveRight, knobRight);
 
   joyState.rx = clamp(knobRight.x, -1, 1);
-  joyState.ry = -clamp(knobRight.y, -1, 1);
+  joyState.ry = clamp(knobRight.y, -1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
@@ -597,7 +624,7 @@ function onMoveRight(e){
   drawJoy(ctxMvRight, joyMoveRight, knobRight);
 
   joyState.rx = clamp(knobRight.x, -1, 1);
-  joyState.ry = -clamp(knobRight.y, -1, 1);
+  joyState.ry = clamp(knobRight.y, -1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
