@@ -546,10 +546,10 @@ function onDownLeft(e){
   drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
 
   joyState.lx = clamp(knobLeft.x, -1, 1);
-  joyState.ly = -clamp(knobLeft.y, 1, 1);
+  joyState.ly = clamp(knobLeft.y, 1, 1);
 
   setMoveStateText();
-  sendJoyThrottled(true);
+  sendJoyThrottled(false);
 }
 function onMoveLeft(e){
   if (!draggingLeft) return;
@@ -558,7 +558,7 @@ function onMoveLeft(e){
   drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
 
   joyState.lx = clamp(knobLeft.x, -1, 1);
-  joyState.ly = -clamp(knobLeft.y, -1, 1);
+  joyState.ly = clamp(knobLeft.y, -1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
@@ -574,7 +574,7 @@ function onUpLeft(){
   joyState.ly = 0;
 
   setMoveStateText();
-  sendJoyThrottled(true);
+  sendJoyThrottled(false);
 }
 
 // RIGHT stick handlers (updates rx, ry)
@@ -588,7 +588,7 @@ function onDownRight(e){
   joyState.ry = -clamp(knobRight.y, -1, 1);
 
   setMoveStateText();
-  sendJoyThrottled(true);
+  sendJoyThrottled(false);
 }
 function onMoveRight(e){
   if (!draggingRight) return;
@@ -613,7 +613,7 @@ function onUpRight(){
   joyState.ry = 0;
 
   setMoveStateText();
-  sendJoyThrottled(true);
+  sendJoyThrottled(false);
 }
 
 // Mouse events
@@ -648,7 +648,7 @@ btnCenterMove.addEventListener("click", ()=>{
 
   setMoveStateText();
   lastJoySent = 0;
-  sendJoyThrottled(true);
+  sendJoyThrottled(false);
 });
 
 // ======================
@@ -662,7 +662,7 @@ function updateTriggerUI(){
   setMoveStateText();
 
   // If user is adjusting triggers, send joy at a modest rate
-  sendJoyThrottled(true);
+  sendJoyThrottled(false);
 }
 
 ltSlider.addEventListener("input", updateTriggerUI);
