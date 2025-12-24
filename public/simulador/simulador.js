@@ -535,7 +535,7 @@ function sendJoyThrottled(force=false){
 // CONTINUOUS JOY SEND (while sticks not centered)
 // ======================
 const JOY_CENTER_EPS = 0.02;   // deadzone para considerar "origen"
-const JOY_HOLD_SEND_HZ = 60;   // frecuencia de reenvío mientras está sostenido
+const JOY_HOLD_SEND_HZ = 10;   // frecuencia de reenvío mientras está sostenido
 
 function sticksNotCentered(){
   return (
@@ -573,7 +573,7 @@ function onDownLeft(e){
   drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
 
   joyState.lx = clamp(knobLeft.x, -1, 1);
-  joyState.ly = -clamp(knobLeft.y, 1, 1);
+  joyState.ly = -clamp(knobLeft.y, -1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
