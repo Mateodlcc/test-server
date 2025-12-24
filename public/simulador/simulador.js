@@ -573,7 +573,7 @@ function onDownLeft(e){
   drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
 
   joyState.lx = clamp(knobLeft.x, -1, 1);
-  joyState.ly = clamp(knobLeft.y, 1, 1);
+  joyState.ly = -clamp(knobLeft.y, 1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
@@ -585,7 +585,7 @@ function onMoveLeft(e){
   drawJoy(ctxMvLeft, joyMoveLeft, knobLeft);
 
   joyState.lx = clamp(knobLeft.x, -1, 1);
-  joyState.ly = clamp(knobLeft.y, -1, 1);
+  joyState.ly = -clamp(knobLeft.y, -1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
@@ -612,7 +612,7 @@ function onDownRight(e){
   drawJoy(ctxMvRight, joyMoveRight, knobRight);
 
   joyState.rx = clamp(knobRight.x, -1, 1);
-  joyState.ry = clamp(knobRight.y, -1, 1);
+  joyState.ry = -clamp(knobRight.y, -1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
@@ -624,7 +624,7 @@ function onMoveRight(e){
   drawJoy(ctxMvRight, joyMoveRight, knobRight);
 
   joyState.rx = clamp(knobRight.x, -1, 1);
-  joyState.ry = clamp(knobRight.y, -1, 1);
+  joyState.ry = -clamp(knobRight.y, -1, 1);
 
   setMoveStateText();
   sendJoyThrottled(false);
