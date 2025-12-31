@@ -6,6 +6,8 @@ const modeEl = document.getElementById("mode");
 const hfovEl = document.getElementById("hfov");
 const vfovEl = document.getElementById("vfov");
 const video360Sel = document.getElementById("video360Sel");
+const webcamResEl = document.getElementById("webcamRes");
+const webcamFpsEl = document.getElementById("webcamFps");
 
 const btnConnect = document.getElementById("btnConnect");
 const btnDisconnect = document.getElementById("btnDisconnect");
@@ -15,36 +17,12 @@ const btnStopAll = document.getElementById("btnStopAll");
 const wsStatusEl = document.getElementById("wsStatus");
 const pcStatusEl = document.getElementById("pcStatus");
 const mediaStatusEl = document.getElementById("mediaStatus");
-async function measureAndDisplayFPS() {
-  if (!localStream) {
-    fpsEl.textContent = "FPS: --";
-    return;
-  }
 
-  const track = localStream.getVideoTracks()[0];
-  if (!track) {
-    fpsEl.textContent = "FPS: --";
-    return;
-  }
-
-  try {
-    const stats = await pc.getStats(track);
-    let frameRate = 0;
-    stats.forEach(report => {
-      // console.log(report);
-      if (report.type === "outbound-rtp" && report.mediaType === "video") {
-        frameRate = report.framesPerSecond || "n/a";
-      }
-    });
-    fpsEl.textContent = `FPS: ${frameRate.toFixed(1)}`;
-  } catch (e) {
-    fpsEl.textContent = "FPS: error";
-  }
-}
-
-setInterval(measureAndDisplayFPS, 1000);
 const selStatusEl = document.getElementById("selStatus");
 const fpsEl = document.getElementById("FPS");
+const netRttEl = document.getElementById("netRtt");
+const netJitterEl = document.getElementById("netJitter");
+const capResEl = document.getElementById("capRes");
 
 const rawLog = document.getElementById("rawLog");
 const controlsLog = document.getElementById("controlsLog");
@@ -77,6 +55,102 @@ function normalizeYaw(y){
   while (y > 180) y -= 360;
   return y;
 }
+
+// Parse "1280x720" etc.
+function parseRes(value) {
+  if (!value || value === "auto") return null;
+  const m = value.match(/^(\d+)\s*x\s*(\d+)$/i);
+  if (!m) return null;
+  return { w: parseInt(m[1], 10), h: parseInt(m[2], 10) };
+}
+
+function getCurrentWebcamTarget() {
+  const fps = parseInt(webcamFpsEl.value, 10) || 60;
+  const res = parseRes(webcamResEl.value);
+  return { fps, res };
+}
+
+function updateCaptureLabel() {
+  try {
+    if (!localStream) { capResEl.textContent = "Capture: --"; return; }
+    const track = localStream.getVideoTracks()?.[0];
+    if (!track) { capResEl.textContent = "Capture: --"; return; }
+    const s = track.getSettings ? track.getSettings() : {};
+    const w = s.width ?? "--";
+    const h = s.height ?? "--";
+    const fps = s.frameRate ?? "--";
+    capResEl.textContent = `Capture: ${w}×${h}@${fps}`;
+  } catch {
+    capResEl.textContent = "Capture: --";
+  }
+}
+
+function fmtMs(v) {
+  if (v == null || Number.isNaN(v)) return "--";
+  return (v * 1000).toFixed(1) + "ms";
+}
+
+// Poll sender-side stats (FPS + RTT + remote jitter)
+async function measureAndDisplayStats() {
+  if (!localStream || !pc) {
+    fpsEl.textContent = "FPS: --";
+    netRttEl.textContent = "RTT: --";
+    netJitterEl.textContent = "Jitter: --";
+    updateCaptureLabel();
+    return;
+  }
+
+  const track = localStream.getVideoTracks()[0];
+  if (!track) {
+    fpsEl.textContent = "FPS: --";
+    netRttEl.textContent = "RTT: --";
+    netJitterEl.textContent = "Jitter: --";
+    updateCaptureLabel();
+    return;
+  }
+
+  try {
+    const stats = await pc.getStats(track);
+
+    let frameRate = null;
+    let jitterSec = null;
+    let rttSec = null;
+
+    // If available, use nominated+succeeded pair RTT (best view of network path)
+    let pairRtt = null;
+
+    stats.forEach(report => {
+      if (report.type === "outbound-rtp" && (report.kind === "video" || report.mediaType === "video")) {
+        if (typeof report.framesPerSecond === "number") frameRate = report.framesPerSecond;
+      }
+
+      // Sender can see receiver feedback via remote-inbound-rtp
+      if (report.type === "remote-inbound-rtp" && (report.kind === "video" || report.mediaType === "video")) {
+        if (typeof report.jitter === "number") jitterSec = report.jitter; // seconds
+        if (typeof report.roundTripTime === "number") rttSec = report.roundTripTime; // seconds
+      }
+
+      if (report.type === "candidate-pair" && report.state === "succeeded" && report.nominated) {
+        if (typeof report.currentRoundTripTime === "number") pairRtt = report.currentRoundTripTime; // seconds
+      }
+    });
+
+    if (frameRate != null) fpsEl.textContent = `FPS: ${frameRate.toFixed(1)}`;
+    else fpsEl.textContent = `FPS: --`;
+
+    const rttUse = (pairRtt != null) ? pairRtt : rttSec;
+    netRttEl.textContent = `RTT: ${rttUse != null ? fmtMs(rttUse) : "--"}`;
+    netJitterEl.textContent = `Jitter: ${jitterSec != null ? fmtMs(jitterSec) : "--"}`;
+
+    updateCaptureLabel();
+  } catch (e) {
+    fpsEl.textContent = "FPS: error";
+    netRttEl.textContent = "RTT: error";
+    netJitterEl.textContent = "Jitter: error";
+    updateCaptureLabel();
+  }
+}
+setInterval(measureAndDisplayStats, 500);
 
 // ---------- State ----------
 let ws = null;
@@ -116,12 +190,10 @@ const latest = {
 // --- Low latency WebRTC tuning ---
 function preferCodecInSdp(sdp, preferred) {
   // preferred: "H264" or "VP8"
-  // Very small SDP "munging": reorder payload types in m=video
   const lines = sdp.split("\n");
   const mLineIdx = lines.findIndex(l => l.startsWith("m=video"));
   if (mLineIdx < 0) return sdp;
 
-  // collect pt for preferred codec
   const rtpmap = lines
     .filter(l => l.startsWith("a=rtpmap:"))
     .map(l => {
@@ -137,7 +209,6 @@ function preferCodecInSdp(sdp, preferred) {
   const header = parts.slice(0, 3);
   const pts = parts.slice(3);
 
-  // Move preferred pts to the front (stable)
   const newPts = [
     ...preferredPts.filter(pt => pts.includes(pt)),
     ...pts.filter(pt => !preferredPts.includes(pt))
@@ -154,26 +225,19 @@ async function tuneSenderForLowLatency(pc, maxKbps = 6000, maxFps = 60) {
   const p = sender.getParameters();
   if (!p.encodings || !p.encodings.length) p.encodings = [{}];
 
-  // Hard caps (avoid encoder queueing)
   p.encodings[0].maxBitrate = maxKbps * 1000;
   p.encodings[0].maxFramerate = maxFps;
 
-  // If you are sending huge frames, enforce downscale in the encoder:
-  // (1.0 = native, 2.0 = half res, etc.)
-  // You can dynamically change this per mode later.
   if (p.encodings[0].scaleResolutionDownBy == null) {
     p.encodings[0].scaleResolutionDownBy = 1.0;
   }
 
-  // Some browsers respect priority hints
   p.degradationPreference = "maintain-framerate";
 
   try { await sender.setParameters(p); } catch (e) {}
 
-  // Request frequent keyframes early (helps “instant start”)
   try { sender.generateKeyFrame?.(); } catch {}
 }
-
 
 function sendWs(obj) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -192,7 +256,6 @@ function ensurePc() {
     rtcpMuxPolicy: "require",
     iceCandidatePoolSize: 4
   });
-
 
   pc.onicecandidate = (ev) => {
     if (!ev.candidate) return;
@@ -226,19 +289,16 @@ async function handleOffer(msg) {
 
   const answer = await pc.createAnswer();
 
-  // Prefer H264 for Quest if available, otherwise VP8.
-  // (Quest typically does well with H264 hardware decode.)
+  // Prefer VP8 for now (you observed better behavior). Switch back later if needed.
   let sdp = answer.sdp;
-  sdp = preferCodecInSdp(sdp, "H264");
+  sdp = preferCodecInSdp(sdp, "VP8");
   answer.sdp = sdp;
 
   await pc.setLocalDescription(answer);
 
-  // IMPORTANT: tune sender immediately after localDescription is set
   await tuneSenderForLowLatency(pc, 6000, 60);
 
   sendWs({ type: "answer", sdp: pc.localDescription.sdp });
-
   log(sigLog, "Answer sent");
 }
 
@@ -299,7 +359,6 @@ function drawWrapped(video, ctx,
   }
 }
 
-// Full equirect (outW x outH) that is BLACK everywhere, and only the viewport is drawn.
 function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
   stopCropLoop();
 
@@ -316,7 +375,7 @@ function startBlackEquirectWithViewport(videoEl, outW = 2048, outH = 1024) {
 
   cropCtx = cropCanvas.getContext("2d", { alpha: false });
 
-  const tmpStream = cropCanvas.captureStream(0); // manual requestFrame()
+  const tmpStream = cropCanvas.captureStream(0);
   const track = tmpStream.getVideoTracks()[0];
   localStream = new MediaStream([track]);
 
@@ -404,6 +463,8 @@ async function stopMediaOnly(myOp=null) {
 
   localStream = null;
   preview.srcObject = null;
+
+  capResEl.textContent = "Capture: --";
   setStatus(mediaStatusEl, "Media: off", "idle");
 }
 
@@ -432,13 +493,22 @@ async function applyModeAndStartMedia() {
     const m = modeEl.value;
 
     if (m === "webcam2d") {
-      const frameRate = parseInt(document.getElementById("webcamFps").value) || 60;
+      const { fps, res } = getCurrentWebcamTarget();
+
+      const videoConstraints = {
+        frameRate: { ideal: fps, min: Math.min(30, fps) },
+      };
+
+      if (res) {
+        videoConstraints.width = { ideal: res.w };
+        videoConstraints.height = { ideal: res.h };
+      } else {
+        videoConstraints.width = { ideal: 1280 };
+        videoConstraints.height = { ideal: 720 };
+      }
+
       webcamStream = await navigator.mediaDevices.getUserMedia({
-        video: { 
-          frameRate: { ideal: frameRate, min: 30 },
-          width: { ideal: 1280 }, 
-          height: { ideal: 720 }
-        },
+        video: videoConstraints,
         audio: false
       });
       if (myOp !== mediaOpId) return;
@@ -446,8 +516,10 @@ async function applyModeAndStartMedia() {
       localStream = webcamStream;
       preview.srcObject = localStream;
 
+      updateCaptureLabel();
+
       sendUnityRenderMode();
-      setStatus(mediaStatusEl, "Media: webcam (2D)", "ok");
+      setStatus(mediaStatusEl, `Media: webcam (2D)`, "ok");
     }
     else {
       video360El = document.createElement("video");
@@ -480,9 +552,6 @@ async function applyModeAndStartMedia() {
         sendUnityRenderMode();
         setStatus(mediaStatusEl, "Media: 360 (skybox)", "ok");
       } else {
-        const isHighRes = video360Sel.value === "360_2";
-        // const canvasW = isHighRes ? 8192 : 4096;
-        // const canvasH = isHighRes ? 4096 : 2048;
         const canvasW = 2048;
         const canvasH = 1024;
         localStream = startBlackEquirectWithViewport(video360El, canvasW, canvasH);
@@ -491,6 +560,8 @@ async function applyModeAndStartMedia() {
         sendUnityRenderMode();
         setStatus(mediaStatusEl, "Media: crop360 (black equirect)", "ok");
       }
+
+      updateCaptureLabel();
     }
 
     const track = localStream.getVideoTracks()[0];
@@ -504,18 +575,17 @@ async function applyModeAndStartMedia() {
       log(sigLog, "replaceTrack(video)");
     }
 
-    // after addTrack/replaceTrack:
+    // after addTrack/replaceTrack
     await tuneSenderForLowLatency(pc, 6000, 60);
 
-    // If crop360 is enabled, DO NOT send 8192-wide frames.
-    // Force encoder downscale (much lower latency).
+    // Keep your existing crop360 scaling safety
     const sender = pc.getSenders().find(s => s.track && s.track.kind === "video");
     if (sender) {
       const p = sender.getParameters();
       if (!p.encodings || !p.encodings.length) p.encodings = [{}];
 
       if (modeEl.value === "crop360") {
-        p.encodings[0].scaleResolutionDownBy = 2.0; // try 2.0 or 3.0
+        p.encodings[0].scaleResolutionDownBy = 2.0;
         p.encodings[0].maxBitrate = 4500 * 1000;
         p.encodings[0].maxFramerate = 60;
       } else {
@@ -526,7 +596,6 @@ async function applyModeAndStartMedia() {
       p.degradationPreference = "maintain-framerate";
       try { await sender.setParameters(p); } catch {}
     }
-
 
     if (pendingOffer) {
       const offer = pendingOffer;
@@ -546,6 +615,37 @@ async function applyModeAndStartMedia() {
   }
 }
 
+// Try to apply webcam resolution live without restarting media
+async function applyWebcamResolutionLive() {
+  if (!webcamStream || modeEl.value !== "webcam2d") return;
+
+  const track = webcamStream.getVideoTracks()?.[0];
+  if (!track || !track.applyConstraints) return;
+
+  const { fps, res } = getCurrentWebcamTarget();
+
+  const c = {
+    frameRate: { ideal: fps },
+  };
+
+  if (res) {
+    c.width = { ideal: res.w };
+    c.height = { ideal: res.h };
+  }
+
+  try {
+    await track.applyConstraints(c);
+    log(sigLog, `Applied webcam constraints live: ${res ? `${res.w}x${res.h}` : "auto"} @${fps}`);
+    updateCaptureLabel();
+
+    // Nudge encoder to emit a fresh keyframe after changing constraints
+    const sender = pc?.getSenders?.().find(s => s.track && s.track.kind === "video");
+    try { sender?.generateKeyFrame?.(); } catch {}
+  } catch (e) {
+    log(sigLog, `applyConstraints failed (${e.message}). Press Start/Apply Mode to restart with new res.`);
+  }
+}
+
 // ---------- Cleanup ----------
 function cleanupAll() {
   pendingOffer = null;
@@ -562,6 +662,10 @@ function cleanupAll() {
 
   selStatusEl.textContent = "";
   fpsEl.textContent = "";
+  netRttEl.textContent = "RTT: --";
+  netJitterEl.textContent = "Jitter: --";
+  capResEl.textContent = "Capture: --";
+
   btnStartMedia.disabled = true;
   btnDisconnect.disabled = true;
   btnStopAll.disabled = true;
@@ -662,6 +766,10 @@ btnDisconnect.onclick = () => {
 
 btnStartMedia.onclick = async () => { await applyModeAndStartMedia(); };
 btnStopAll.onclick = cleanupAll;
+
+// Live apply when changing webcam resolution/fps (if webcam mode is running)
+webcamResEl.addEventListener("change", () => applyWebcamResolutionLive());
+webcamFpsEl.addEventListener("change", () => applyWebcamResolutionLive());
 
 setInterval(() => {
   const ageMs = lastControlAt ? (Date.now() - lastControlAt) : null;

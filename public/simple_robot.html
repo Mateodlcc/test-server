@@ -1,0 +1,250 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Robot Sender (no UI)</title>
+</head>
+<body>
+<script>
+(() => {
+  // === CONFIG ===
+  const WS_URL = "ws://192.168.0.77:3000";
+  const ROBOT_ID = "sim-robot-1"; // must match what your viewer selects
+  const STUN_URL = "stun:stun.l.google.com:19302";
+
+  // Best-effort codec preference in the ANSWER SDP ("VP8" or "H264")
+  const PREFERRED_CODEC = "VP8";
+
+  // Sender constraints (best-effort; actual may differ depending on camera/driver)
+  const CAPTURE = {
+    width: 1280,
+    height: 720,
+    fps: 30
+  };
+
+  // Low-latency sender tuning (best-effort)
+  const MAX_BITRATE_KBPS = 2500; // try 1500-3000 for 720p, adjust as needed
+  const MAX_FRAMERATE = 30;
+
+  // === State ===
+  let ws = null;
+  let pc = null;
+  let localStream = null;
+  let pendingCandidates = [];
+
+  function log(...args) { console.log("[robot]", ...args); }
+
+  function sendWs(obj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(obj));
+  }
+
+  // Reorder m=video payload types to prefer a codec in SDP (best-effort).
+  function preferCodecInSdp(sdp, preferred) {
+    if (!preferred) return sdp;
+    const lines = sdp.split("\n");
+    const mLineIdx = lines.findIndex(l => l.startsWith("m=video"));
+    if (mLineIdx < 0) return sdp;
+
+    const rtpmap = lines
+      .filter(l => l.startsWith("a=rtpmap:"))
+      .map(l => {
+        const m = l.match(/^a=rtpmap:(\d+)\s+([^/]+)/);
+        return m ? { pt: m[1], codec: m[2].toUpperCase() } : null;
+      })
+      .filter(Boolean);
+
+    const preferredPts = rtpmap
+      .filter(x => x.codec === preferred.toUpperCase())
+      .map(x => x.pt);
+
+    if (!preferredPts.length) return sdp;
+
+    const parts = lines[mLineIdx].trim().split(" ");
+    const header = parts.slice(0, 3);
+    const pts = parts.slice(3);
+
+    const newPts = [
+      ...preferredPts.filter(pt => pts.includes(pt)),
+      ...pts.filter(pt => !preferredPts.includes(pt))
+    ];
+
+    lines[mLineIdx] = [...header, ...newPts].join(" ");
+    return lines.join("\n");
+  }
+
+  async function tuneSenderForLowLatency() {
+    const sender = pc?.getSenders?.().find(s => s.track && s.track.kind === "video");
+    if (!sender) return;
+
+    const p = sender.getParameters();
+    if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+
+    // Bitrate + framerate caps reduce bursts/queueing (often lowers jitter buffer)
+    p.encodings[0].maxBitrate = MAX_BITRATE_KBPS * 1000;
+    p.encodings[0].maxFramerate = MAX_FRAMERATE;
+
+    // Keep framerate stable under load (latency-friendly)
+    p.degradationPreference = "maintain-framerate";
+
+    try {
+      await sender.setParameters(p);
+      sender.generateKeyFrame?.();
+      log("Applied sender params:", { MAX_BITRATE_KBPS, MAX_FRAMERATE });
+    } catch (e) {
+      log("sender.setParameters failed (browser-dependent):", e);
+    }
+  }
+
+  async function startMedia() {
+    // NOTE: camera access usually requires HTTPS (or localhost).
+    const constraints = {
+      audio: false,
+      video: {
+        width: { ideal: CAPTURE.width },
+        height: { ideal: CAPTURE.height },
+        frameRate: { ideal: CAPTURE.fps, max: CAPTURE.fps }
+      }
+    };
+
+    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+    const vt = localStream.getVideoTracks()[0];
+    const s = vt.getSettings?.() || {};
+    log("Camera started:", s.width, "x", s.height, "@", s.frameRate);
+
+    return localStream;
+  }
+
+  function ensurePc() {
+    if (pc) return pc;
+
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: [STUN_URL] }],
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require",
+      iceCandidatePoolSize: 4
+    });
+
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) return;
+      sendWs({
+        type: "candidate",
+        candidate: ev.candidate.candidate,
+        sdpMid: ev.candidate.sdpMid,
+        sdpMLineIndex: ev.candidate.sdpMLineIndex
+      });
+    };
+
+    pc.onconnectionstatechange = () => {
+      log("pc.connectionState =", pc.connectionState);
+    };
+
+    return pc;
+  }
+
+  async function handleOffer(msg) {
+    ensurePc();
+
+    if (!localStream) {
+      await startMedia();
+      // Add track *before* answering
+      for (const track of localStream.getTracks()) {
+        pc.addTrack(track, localStream);
+      }
+    }
+
+    await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+
+    // Add any candidates received early
+    for (const c of pendingCandidates) {
+      try { await pc.addIceCandidate(c); } catch {}
+    }
+    pendingCandidates = [];
+
+    const answer = await pc.createAnswer();
+
+    // Best-effort codec preference
+    answer.sdp = preferCodecInSdp(answer.sdp, PREFERRED_CODEC);
+
+    await pc.setLocalDescription(answer);
+
+    await tuneSenderForLowLatency();
+
+    sendWs({ type: "answer", sdp: pc.localDescription.sdp });
+    log("Sent answer");
+  }
+
+  async function handleCandidate(msg) {
+    if (!pc) {
+      // Queue until we have a PeerConnection
+      pendingCandidates.push({
+        candidate: msg.candidate,
+        sdpMid: msg.sdpMid,
+        sdpMLineIndex: msg.sdpMLineIndex
+      });
+      return;
+    }
+
+    const ice = {
+      candidate: msg.candidate,
+      sdpMid: msg.sdpMid,
+      sdpMLineIndex: msg.sdpMLineIndex
+    };
+
+    // If remote description not set yet, queue
+    if (!pc.remoteDescription) {
+      pendingCandidates.push(ice);
+      return;
+    }
+
+    try {
+      await pc.addIceCandidate(ice);
+    } catch (e) {
+      log("addIceCandidate error:", e);
+    }
+  }
+
+  function connectWs() {
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = async () => {
+      log("WS connected:", WS_URL);
+
+      // Identify as robot (same structure as your robot.js)
+      sendWs({ type: "hello", role: "robot", robotId: ROBOT_ID, meta: { name: "No-UI Robot Sender" } });
+
+      // Optional: tell viewer how to render (safe even if ignored by server)
+      sendWs({ type: "streamMode", mode: "flat2d" });
+
+      // You can start media immediately, or wait for offer.
+      // Starting early avoids waiting for permission at offer time.
+      try {
+        await startMedia();
+      } catch (e) {
+        log("getUserMedia failed (likely needs HTTPS or permission):", e);
+      }
+    };
+
+    ws.onmessage = async (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+
+      if (msg.type === "offer") return handleOffer(msg);
+      if (msg.type === "candidate") return handleCandidate(msg);
+
+      if (msg.type === "hello_ok") return log("hello_ok");
+      if (msg.type === "viewer_attached") return log("viewer_attached");
+      if (msg.type === "viewer_detached") return log("viewer_detached");
+    };
+
+    ws.onerror = (e) => log("WS error:", e);
+    ws.onclose = () => log("WS closed");
+  }
+
+  // Start
+  connectWs();
+})();
+</script>
+</body>
+</html>

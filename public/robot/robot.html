@@ -34,6 +34,16 @@
         <option value="60">60</option>
       </select>
 
+      <label>Webcam Res</label>
+      <select id="webcamRes" style="width:130px" title="Applies live if possible, otherwise press Start/Apply">
+        <option value="1920x1080">1920×1080</option>
+        <option value="1280x720" selected>1280×720</option>
+        <option value="960x540">960×540</option>
+        <option value="640x360">640×360</option>
+        <option value="320x180">320×180</option>
+        <option value="auto">Auto</option>
+      </select>
+
       <label>360 Video:</label>
       <select id="video360Sel" style="width: 240px">
         <option value="360">360.mp4 (1920×1080)</option>
@@ -53,13 +63,18 @@
 
       <button id="btnStartMedia" class="secondary" disabled>Start / Apply Mode</button>
       <button id="btnStopAll" class="danger" disabled>Stop All</button>
-      <span class="small">Start media, then select this robot in Unity.</span>
+      <span class="small">Tip: change resolution while streaming and watch Unity jitterBufferAvgMs in real time.</span>
     </div>
 
     <div class="status-bar">
       <span id="wsStatus"><span class="status-dot status-idle"></span>WS: disconnected</span>
       <span id="pcStatus"><span class="status-dot status-idle"></span>WebRTC: idle</span>
       <span id="mediaStatus"><span class="status-dot status-idle"></span>Media: off</span>
+
+      <span id="netRtt">RTT: --</span>
+      <span id="netJitter">Jitter: --</span>
+      <span id="capRes">Capture: --</span>
+
       <span id="selStatus"></span>
       <span id="FPS"></span>
     </div>

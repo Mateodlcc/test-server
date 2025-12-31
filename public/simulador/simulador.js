@@ -84,6 +84,40 @@ const joyState = {
 
 const btnState = new Map(); // id -> 0/1
 
+// --- Low latency WebRTC tuning ---
+function preferCodecInSdp(sdp, preferred) {
+  // preferred: "H264" or "VP8"
+  // Very small SDP "munging": reorder payload types in m=video
+  const lines = sdp.split("\n");
+  const mLineIdx = lines.findIndex(l => l.startsWith("m=video"));
+  if (mLineIdx < 0) return sdp;
+
+  // collect pt for preferred codec
+  const rtpmap = lines
+    .filter(l => l.startsWith("a=rtpmap:"))
+    .map(l => {
+      const m = l.match(/^a=rtpmap:(\d+)\s+([^/]+)/);
+      return m ? { pt: m[1], codec: m[2].toUpperCase() } : null;
+    })
+    .filter(Boolean);
+
+  const preferredPts = rtpmap.filter(x => x.codec === preferred.toUpperCase()).map(x => x.pt);
+  if (!preferredPts.length) return sdp;
+
+  const parts = lines[mLineIdx].trim().split(" ");
+  const header = parts.slice(0, 3);
+  const pts = parts.slice(3);
+
+  // Move preferred pts to the front (stable)
+  const newPts = [
+    ...preferredPts.filter(pt => pts.includes(pt)),
+    ...pts.filter(pt => !preferredPts.includes(pt))
+  ];
+
+  lines[mLineIdx] = [...header, ...newPts].join(" ");
+  return lines.join("\n");
+}
+
 // --- WS send ---
 function send(obj){
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -306,6 +340,8 @@ btnStart.onclick = async ()=>{
 
   try{
     const offer = await pc.createOffer();
+    // Munge offer to prefer H264
+    offer.sdp = preferCodecInSdp(offer.sdp, "H264");
     await pc.setLocalDescription(offer);
     send({ type:"offer", sdp: pc.localDescription.sdp });
     log("Offer enviada");

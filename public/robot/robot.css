@@ -100,6 +100,14 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+/* NEW: make the plain text status items align nicely */
+#netRtt, #netJitter, #capRes {
+  padding: 2px 8px;
+  border: 1px solid #111827;
+  border-radius: 999px;
+  background: #020617;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
